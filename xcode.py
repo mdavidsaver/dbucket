@@ -33,14 +33,14 @@ class XCode(object):
     def make_fixed_decode(spec):
         ST = struct.Struct(spec)
         def _decode(self):
-            SH = self.pos%ST.size
+            SH = self.bpos%ST.size
             if SH:
                 SH = ST.size-SH
             B = self.buf[SH:SH+ST.size]
             assert len(B)==ST.size, (repr(B), ST.size, spec)
             V, = ST.unpack(B)
             self.buf = self.buf[SH+ST.size:]
-            self.pos += SH+ST.size
+            self.bpos += SH+ST.size
             self.stack[-1].append(V)
             self.spos += 1
         return _decode
@@ -61,15 +61,63 @@ class XCode(object):
         # uint32 with size in bytes
         assert len(self.buf)>=4
         self._D[ord(b'b')](self)
+        # spos now after 'a'
         BC = self.stack[-1].pop()
 
-        arr = self.buf[0:BC]
-        self.buf = self.buf[BC:]
-        self.pos += BC
-        self.spos += 1
-        print('after array', self.spos, self.pos, arr, self.buf, file=sys.stderr)
+        # find the end of the array element sig
+        SP, depth = self.spos, 0
+        while SP<len(self.sig):
+            if self.sig[SP]==b'(':
+                depth += 1
+            elif self.sig[SP]==b')':
+                depth -= 1
+            SP += 1
+            if self.sig[SP]==b'a':
+                continue
+            if depth==0:
+                break
 
-        self.stack[-1].append(arr)
+        if depth!=0:
+            raise ValueError("Missing ')' in '%s'"%self.sig[self.spos:])
+        elif self.sig[SP-1]==b'a':
+            raise ValueError("expect type after 'a'")
+
+        asig = self.sig[self.spos:SP]
+        abuf = self.buf[0:BC]
+        #print('before array', self.sig, asig, abuf, file=sys.stderr)
+        afterbuf = self.buf[BC:]
+        newpos = self.bpos + BC
+
+        # buffer pos after array, sig. pos after array, original sig, remaining buf
+        # self.spos, self.sig, self.buf = self.astack.pop()
+        self.astack.append((SP, self.sig, afterbuf))
+        self.stack.append([])
+
+        self.sig  = asig
+        self.spos = 0
+        self.buf  = abuf
+        #print('after array', self.spos, self.bpos, abuf, self.buf, file=sys.stderr)
+
+    def _decode(self):
+        while self.spos<len(self.sig) or len(self.astack)>0:
+            #print('D', self.spos, self.sig, len(self.stack), self.bpos, self.buf, file=sys.stderr)
+            # iterate until sig consumed
+            while self.spos<len(self.sig):
+                #print('P', self.spos, self.bpos, self.sig[self.spos:], self.buf[self.bpos:], file=sys.stderr)
+                S=self.sig[self.spos]
+                self._D[S](self)
+
+            if self.spos!=len(self.sig):
+                raise ValueError('Sig over consumed %s %s'%(self.sig, self.spos, len(self.sig)))
+
+            if len(self.astack)>0:
+                if len(self.buf)==0:
+                    # finished last element
+                    self.spos, self.sig, self.buf = self.astack.pop()
+                    ARR = self.stack.pop()
+                    self.stack[-1].append(ARR)
+                else:
+                    self.spos = 0
 
     def decode(self, sig, buf):
         """
@@ -88,29 +136,29 @@ class XCode(object):
         >>> L.decode(b'y(yy)', b'abc')
         [97, [98, 99]]
         >>> L.decode(b'bayb', b'dcba\\x04\\x00\\x00\\x001234dcba')
-        [1633837924, [49, 47, 48, 49], 1633837924]
+        [1633837924, [49, 50, 51, 52], 1633837924]
         """
-        self.buf = buf
-        self.spos= 0
-        self.pos = 0
-        self.stack = [[]]
-        while self.spos<len(sig):
-            print(self.spos, self.pos, sig[self.spos:], file=sys.stderr)
-            SP = self.spos
-            S=sig[SP]
-            self._D[S](self)
-            assert self.spos>SP, (sig, buf, self.spos, SP)
-        if len(sig)!=self.spos:
-            raise ValueError('Sig over consumed %s %s'%(sig, self.spos))
-        elif len(buf)!=self.pos:
-            raise ValueError('buf not fully consumed %d %d'%(len(buf), self.pos))
-        if len(self.stack)!=1:
-            raise ValueError('Decode leaves invalid stack: %s'%self.stack)
-        R = self.stack[0]
-        if len(R)==1:
-            return R[0]
-        else:
-            return R
+        try:
+            if len(sig)==0 or sig[-1]==b'a':
+                raise ValueError("Invalid sig '%s'"%sig)
+            self.sig = sig
+            self.buf = buf
+            self.spos = 0
+            self.bpos = 0
+            self.stack = [[]]
+            self.astack = []
+            self._decode()
+            if len(buf)!=self.bpos:
+                raise ValueError('buf not fully consumed %d %d'%(len(buf), self.bpos))
+            elif len(self.stack)!=1:
+                raise ValueError('Decode leaves invalid stack: %s'%self.stack)
+            R = self.stack[0]
+            if len(R)==1:
+                return R[0]
+            else:
+                return R
+        except ValueError as e:
+            raise ValueError("DDecode fails: %s: sig=%s buf=%s"%(e, sig, buf))
 
 if __name__=='__main__':
     import doctest
