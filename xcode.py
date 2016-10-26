@@ -93,7 +93,7 @@ del _dmap_plain
 
 def _decode(sig, buffer, lsb=_sys_lsb, bpos=0):
     L = '<' if lsb else '>'
-    assert len(sig)>0
+    assert len(sig)>0, (sig, buffer, lsb, bpos)
     ret = []
     #print("_decode", sig, buffer, bpos, file=sys.stderr)
 
@@ -111,6 +111,7 @@ def _decode(sig, buffer, lsb=_sys_lsb, bpos=0):
             asize, = struct.unpack(L+'I', buffer[:4])
             bpos += 4
             abuffer, buffer = buffer[4:4+asize], buffer[4+asize:]
+            assert len(abuffer)==asize, (len(abuffer), asize, abuffer)
             #print("array with", bpos, asize, abuffer, file=sys.stderr)
             after = bpos+asize
             ARR = []
@@ -118,7 +119,7 @@ def _decode(sig, buffer, lsb=_sys_lsb, bpos=0):
                 STR, abuffer, bpos = _decode(selem[1:], abuffer, lsb=lsb, bpos=bpos)
                 #print("  [] ->", STR[0], file=sys.stderr)
                 ARR.append(STR[0])
-            assert bpos==after, (bpos, after)
+            assert bpos==after, (bpos, after) # array decode
             ret.append(ARR)
 
         elif selem[0] in (ord(b'g'),):
@@ -150,7 +151,7 @@ def _decode(sig, buffer, lsb=_sys_lsb, bpos=0):
 
     return ret, buffer, bpos
 
-def decode(sig, buffer, lsb=_sys_lsb):
+def decode(sig, buffer, lsb=_sys_lsb, bpos=0):
     """
 
     Some basics
@@ -181,7 +182,7 @@ def decode(sig, buffer, lsb=_sys_lsb):
 
     Hello reply
 
-    >>> decode(b'yyyyuua(yv)', b'l\\2\\1\\1\\v\\0\\0\\0\\1\\0\\0\\0=\\0\\0\\0\\6\\1s\\0\\6\\0\\0\\0:1.336\\0\\0\\5\\1u\\0\\1\\0\\0\\0\\10\\1g\\0\\1s\\0\\0\\7\\1s\\0\\24\\0\\0\\0org.freedesktop.DBus\\0', lsb=True)
+    >>> decode(b'yyyyuua(yv)', b'l\\x02\\x01\\x01\\x0b\\x00\\x00\\x00\\x01\\x00\\x00\\x00=\\x00\\x00\\x00\\x06\\x01s\\x00\\x06\\x00\\x00\\x00:1.336\\x00\\x00\\x05\\x01u\\x00\\x01\\x00\\x00\\x00\\x08\\x01g\\x00\\x01s\\x00\\x00\\x07\\x01s\\x00\\x14\\x00\\x00\\x00org.freedesktop.DBus\\x00', lsb=True)
     [108, 2, 1, 1, 11, 1, [[6, ':1.336'], [5, 1], [8, b's'], [7, 'org.freedesktop.DBus']]]
     >>> decode(b'yyyyuua(yv)', b'l\\4\\1\\1\\v\\0\\0\\0\\2\\0\\0\\0\\215\\0\\0\\0\\1\\1o\\0\\25\\0\\0\\0/org/freedesktop/DBus\\0\\0\\0\\2\\1s\\0\\24\\0\\0\\0org.freedesktop.DBus\\0\\0\\0\\0\\3\\1s\\0\\f\\0\\0\\0NameAcquired\\0\\0\\0\\0\\6\\1s\\0\\6\\0\\0\\0:1.336\\0\\0\\10\\1g\\0\\1s\\0\\0\\7\\1s\\0\\24\\0\\0\\0org.freedesktop.DBus\\0', lsb=True)
     [108, 4, 1, 1, 11, 2, [[1, '/org/freedesktop/DBus'], [2, 'org.freedesktop.DBus'], [3, 'NameAcquired'], [6, ':1.336'], [8, b's'], [7, 'org.freedesktop.DBus']]]
@@ -199,8 +200,8 @@ def decode(sig, buffer, lsb=_sys_lsb):
     [108, 1, 0, 1, 19, 2, [[1, '/org/freedesktop/DBus'], [6, 'org.freedesktop.DBus'], [2, 'org.freedesktop.DBus'], [3, 'AddMatch'], [8, b's'], [7, ':1.336']]]
     """
     try:
-        R, remain, bpos = _decode(sig, buffer, lsb=lsb, bpos=0)
-    except (struct.error, ValueError, KeyError) as e:
+        R, remain, bpos = _decode(sig, buffer, lsb=lsb, bpos=bpos)
+    except Exception as e:
         raise ValueError("Error %s while decoding %s %s"%(e, sig, repr(buffer)))
     if bpos!=len(buffer) or len(remain)!=0:
         raise ValueError("Incomplete decode: %s"%repr(remain))
@@ -353,7 +354,7 @@ def encode(sig, val, lsb=_sys_lsb):
     """
     try:
         bufs, bpos = _encode(sig, val, lsb=lsb, bpos=0)
-    except (struct.error, ValueError, KeyError) as e:
+    except Exception as e:
         raise ValueError("Error %s while encoding %s with %s"%(e, sig, val))
     return b''.join(bufs)
 
