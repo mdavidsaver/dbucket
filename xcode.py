@@ -200,8 +200,8 @@ def decode(sig, buffer, lsb=_sys_lsb):
     """
     try:
         R, remain, bpos = _decode(sig, buffer, lsb=lsb, bpos=0)
-    except ValueError as e:
-        raise ValueError("Error %s while decoding '%s' '%s'"%(e, sig, repr(buffer)))
+    except (struct.error, ValueError, KeyError) as e:
+        raise ValueError("Error %s while decoding %s %s"%(e, sig, repr(buffer)))
     if bpos!=len(buffer) or len(remain)!=0:
         raise ValueError("Incomplete decode: %s"%repr(remain))
     if len(R)==1:
@@ -353,7 +353,7 @@ def encode(sig, val, lsb=_sys_lsb):
     """
     try:
         bufs, bpos = _encode(sig, val, lsb=lsb, bpos=0)
-    except (struct.error, ValueError) as e:
+    except (struct.error, ValueError, KeyError) as e:
         raise ValueError("Error %s while encoding %s with %s"%(e, sig, val))
     return b''.join(bufs)
 

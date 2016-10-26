@@ -7,16 +7,20 @@ import os, sys
 import asyncio
 import struct
 
+from xcode import encode, decode, Object
 
-def unpack(lsb, fmt, B):
-    if lsb:
-        return struct.unpack('<%s'%fmt, B)
-    else:
-        return struct.unpack('>%s'%fmt, B)
+_sys_lsb = sys.byteorder=='little'
+_sys_L   = b'l' if _sys_lsb else b'B'
+
+class RemoteError(RuntimeError):
+    pass
 
 class Connection(object):
-    def __init__(self, W, R, info):
-        self._W, self._R, self._info = W, R, info
+    # ignore/error all calls from peers
+    ignore_calls = True
+
+    def __init__(self, W, R, info, loop=None):
+        self._W, self._R, self._info, self._loop = W, R, info, loop
         self._running = True
         self._inprog  = {}
         self._nextsn = 1 #TODO: randomize?
@@ -37,47 +41,115 @@ class Connection(object):
         self.close()
 
     def call(self, path=None, iface=None, member=None, dest=None, sig=None, body=None):
-        request = None
+        _log.debug('call %s', (path, iface, member, dest, sig, body))
+        if body is not None:
+            body = encode(sig, body)
+        else:
+            body = b''
+        SN = self._nextsn
+        while SN in self._inprog:
+            SN += 1
+        self._nextsn = SN+1
+
+        opts = [
+            [1, Object(path)],
+            [3, member],
+        ]
+        if iface is not None:
+            opts.append([2, iface])
+        if dest is not None:
+            opts.append([6, dest])
+        req = [ord(_sys_L), 1, 0, 1,   len(body), SN,   opts]
+        header = encode(b'yyyyuua(yv)', req)
+
+        try:
+            ret = asyncio.Future(loop=self._loop)
+            self._inprog[SN] = ret
+
+            _log.debug("send head %s", repr(header))
+            self._W.write(header)
+            M = len(header)%8
+            if M:
+                self._W.write(b'\0'*(8-M))
+            _log.debug("send body %s", repr(body))
+            self._W.write(body)
+        except:
+            # failure at this point means part of the message is queued,
+            # so we must close the connection
+            self.close()
+            raise
+        return ret
 
     @asyncio.coroutine
     def _recv(self):
         try:
             while True:
                 try:
-                    # message is
+                    # full message spec is
                     #   yyyyuua(yv) ...body...
+                    # Treat the first part as
+                    #   yyyyuuu
+                    # to get body and header array sizes to compute the size of the complete message
                     head = yield from self._R.readexactly(16)
+                    _log.debug("Header %s", repr(head))
 
-                    if head[0] not in (b'l', b'B') or head[3]!=b'\1':
+                    # validate byte order and version
+                    if head[0] not in (ord(b'l'), ord(b'B')) or head[3]!=1:
                         raise RuntimeError('Invalid header %s'%head)
 
-                    mtype, flags = ord(head[1]), ord(head[2])
-                    lsb = head[0]==b'l'
+                    mtype, flags = head[1], head[2]
+                    L = '<' if head[0]==ord(b'l') else '>'
 
-                    blen, sn, hlen = unpack(lsb, 'III', head[4:])
+                    blen, sn, hlen = struct.unpack(L+'III', head[4:])
+
+                    # dbus spec puts arbitrary upper bounds on message and header size
                     if hlen+blen>2**27 or hlen>=2**26:
-                        raise RuntimeError('Message too big')
-                    rest = yield from self._R.readexactly(hlen+blen)
-                    headers, body = rest[:hlen], rest[hlen:]
+                        raise RuntimeError('Message too big %s %s'%(hlen, blen))
 
-                    _log.debug('RX mtype=%d flags=%x hlen=%s blen=%s')
+                    # header is padded so the body starts on an 8 byte boundary
+                    bstart = ((hlen+7)&~7)
+                    fullsize = bstart + blen - 16
 
-                    if mtype not in range(5):
-                        _log.debug('Ignore unknown message type %s', mtype)
-                        continue
+                    rest = yield from self._R.readexactly(fullsize)
+                    headers, body = rest[:hlen], rest[bstart:]
 
-                    try:
-                        F = self._inprog[sn]
-                    except KeyError:
-                        _log.warn('Received message with unknown S/N %s', sn)
+                    headers, = decode(b'yyyyuua(yv)', head[-4:]+headers, lsb=head[0]==b'l')
+
+                    H = [None]*10
+                    for code, val in headers:
+                        H[code] = val
+                    H = headers
+                    del H
+
+                    if len(body):
+                        sig = headers[8]
+                        body = decode(sig, body, lsb=head[0]==b'l')
+
+                    if mtype==1: # METHOD_CALL
+                        if self.ignore_calls:
+                            pass # TODO: return error
+                        else:
+                            pass
+                    elif mtype in (2, 3): # METHOD_RETURN or ERROR
+                        rsn = headers[5]
+                        try:
+                            F = self._inprog[rsn]
+                        except KeyError:
+                            _log.warn('Received reply/error with unknown S/N %s', rsn)
+                        else:
+                            if F:
+                                if mtype==2:
+                                    F.set_result(body)
+                                else:
+                                    F.set_exception(RemoteError(headers[4]))
+                    elif mtype==4: # SIGNAL
+                        path, iface, member = headers[1], headers[2], headers[3]
+                        _log.info("Ignore signal %s %s %s %s", path, iface, member, body)
                     else:
-                        if F:
-                            F.set_result((mtype, flags, headers, body))
+                        _log.debug('Ignoring unknown dbus message type %s', mtype)
 
                 except asyncio.IncompleteReadError:
                     return # connection closed
-                _log.debug('Recv %s', head)
-                raise RuntimeError('not impl')
         except:
             _log.exception('Error in Connnection RX')
             self._W.close()
@@ -153,6 +225,7 @@ def connect_bus(infos, allowed_methods=_supported_methods):
                 L = yield from R.readline()
                 if L.startswith(b'OK'):
                     ok = True
+                    W.write(b'BEGIN\r\n')
                     _log.debug('EXTERNAL accepted')
                 elif L.startswith(b'REJECTED'):
                     _log.debug('EXTERNAL rejected: %s', L)
@@ -165,6 +238,7 @@ def connect_bus(infos, allowed_methods=_supported_methods):
                 W.write(b'AUTH ANONYMOUS'+hexencode(b'Nemo')+b'\r\n')
                 if L.startswith(b'OK'):
                     ok = True
+                    W.write(b'BEGIN\r\n')
                     _log.debug('ANONYMOUS accepted')
                 elif L.startswith(b'REJECTED'):
                     _log.debug('ANONYMOUS rejected: %s', L)
@@ -176,19 +250,34 @@ def connect_bus(infos, allowed_methods=_supported_methods):
                 continue
 
             _log.debug('Authenticated with bus %s', info)
-            return Connection(W, R, info)
         except:
             _log.exception("Can't attach to %s", info)
-        finally:
-            W.close()
+
+        conn = Connection(W, R, info)
+        try:
+
+            hello = yield from conn.call(path='/org/freedesktop/DBus',
+                            member='Hello',
+                            iface='org.freedesktop.DBus',
+                            dest='org.freedesktop.DBus',
+                            )
+            print('IAM', hello)
+        except:
+            conn.close()
+            raise
+        return ret
 
     raise RuntimeError('No Bus')
 
 def main():
     loop = asyncio.get_event_loop()
-    conn = loop.run_until_complete(connect_bus(get_session_infos()))
-    loop.run_until_complete(conn.close())
-    loop.close()
+    try:
+        print("Connect")
+        conn = loop.run_until_complete(connect_bus(get_session_infos()))
+        print("Close")
+        loop.run_until_complete(conn.close())
+    finally:
+        loop.close()
 
 if __name__=='__main__':
     logging.basicConfig(level=logging.DEBUG)
