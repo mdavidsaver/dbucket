@@ -25,6 +25,7 @@ class Connection(object):
         self._inprog  = {}
         self._nextsn = 1 #TODO: randomize?
         self._RX = asyncio.get_event_loop().create_task(self._recv())
+        self._name = None
 
     @asyncio.coroutine
     def close(self):
@@ -35,10 +36,9 @@ class Connection(object):
         if asyncio.Task.current_task() is not self._RX:
             yield from self._RX
 
-    def __enter__(self):
-        return self
-    def __exit__(self,A,B,C):
-        self.close()
+    @property
+    def name(self):
+        return self._name
 
     def call(self, path=None, iface=None, member=None, dest=None, sig=None, body=None):
         _log.debug('call %s', (path, iface, member, dest, sig, body))
@@ -267,6 +267,7 @@ def connect_bus(infos, allowed_methods=_supported_methods):
                             dest='org.freedesktop.DBus',
                             )
             print('IAM', hello)
+            conn._name = hello
         except:
             conn.close()
             raise
