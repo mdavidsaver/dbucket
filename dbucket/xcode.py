@@ -8,26 +8,6 @@ _sys_lsb = sys.byteorder=='little'
 
 def _next_type(sig):
     """ Split type signature after first element (POD, array, or sub-struct)
-    >>> _next_type(b'y')
-    (b'y', b'')
-    >>> _next_type(b'yy')
-    (b'y', b'y')
-    >>> _next_type(b'yyy')
-    (b'y', b'yy')
-    >>> _next_type(b'ay')
-    (b'ay', b'')
-    >>> _next_type(b'ayy')
-    (b'ay', b'y')
-    >>> _next_type(b'yay')
-    (b'y', b'ay')
-    >>> _next_type(b'a(ii)')
-    (b'a(ii)', b'')
-    >>> _next_type(b'a(ii)i')
-    (b'a(ii)', b'i')
-    >>> _next_type(b'aaii')
-    (b'aai', b'i')
-    >>> _next_type(b'aa(ai(yay)i)i')
-    (b'aa(ai(yay)i)', b'i')
     """
     assert isinstance(sig, bytes)
     pos, depth = 0, 0
@@ -153,51 +133,6 @@ def _decode(sig, buffer, lsb=_sys_lsb, bpos=0):
 
 def decode(sig, buffer, lsb=_sys_lsb, bpos=0):
     """
-
-    Some basics
-
-    >>> decode(b'y', b'a', lsb=True)
-    97
-    >>> decode(b'b', b'dcba', lsb=True)
-    1633837924
-    >>> decode(b'b', b'abcd', lsb=False)
-    1633837924
-    >>> decode(b'yyyy', b'abcd', lsb=True)
-    [97, 98, 99, 100]
-    >>> decode(b'yb', b'h   dcba', lsb=True)
-    [104, 1633837924]
-    >>> decode(b'y(yy)', b'a       bc', lsb=True)
-    [97, [98, 99]]
-    >>> decode(b'bayb', b'dcba\\x04\\x00\\x00\\x001234dcba', lsb=True)
-    [1633837924, [49, 50, 51, 52], 1633837924]
-    >>> decode(b'baayb', b'dcba\\x0e\\x00\\x00\\x00\\x02\\x00\\x00\\x0012  \\x02\\x00\\x00\\x0034  dcba', lsb=True)
-    [1633837924, [[49, 50], [51, 52]], 1633837924]
-
-    Actual DBus message headers
-    
-    Initial "Hello" call
-
-    >>> decode(b'yyyyuua(yv)', b"l\\x01\\x00\\x01\\x00\\x00\\x00\\x00\\x01\\x00\\x00\\x00n\\x00\\x00\\x00\\x01\\x01o\\x00\\x15\\x00\\x00\\x00/org/freedesktop/DBus\\x00\\x00\\x00\\x06\\x01s\\x00\\x14\\x00\\x00\\x00org.freedesktop.DBus\\x00\\x00\\x00\\x00\\x02\\x01s\\x00\\x14\\x00\\x00\\x00org.freedesktop.DBus\\x00\\x00\\x00\\x00\\x03\\x01s\\x00\\x05\\x00\\x00\\x00Hello\\x00", lsb=True)
-    [108, 1, 0, 1, 0, 1, [[1, '/org/freedesktop/DBus'], [6, 'org.freedesktop.DBus'], [2, 'org.freedesktop.DBus'], [3, 'Hello']]]
-
-    Hello reply
-
-    >>> decode(b'yyyyuua(yv)', b'l\\x02\\x01\\x01\\x0b\\x00\\x00\\x00\\x01\\x00\\x00\\x00=\\x00\\x00\\x00\\x06\\x01s\\x00\\x06\\x00\\x00\\x00:1.336\\x00\\x00\\x05\\x01u\\x00\\x01\\x00\\x00\\x00\\x08\\x01g\\x00\\x01s\\x00\\x00\\x07\\x01s\\x00\\x14\\x00\\x00\\x00org.freedesktop.DBus\\x00', lsb=True)
-    [108, 2, 1, 1, 11, 1, [[6, ':1.336'], [5, 1], [8, b's'], [7, 'org.freedesktop.DBus']]]
-    >>> decode(b'yyyyuua(yv)', b'l\\4\\1\\1\\v\\0\\0\\0\\2\\0\\0\\0\\215\\0\\0\\0\\1\\1o\\0\\25\\0\\0\\0/org/freedesktop/DBus\\0\\0\\0\\2\\1s\\0\\24\\0\\0\\0org.freedesktop.DBus\\0\\0\\0\\0\\3\\1s\\0\\f\\0\\0\\0NameAcquired\\0\\0\\0\\0\\6\\1s\\0\\6\\0\\0\\0:1.336\\0\\0\\10\\1g\\0\\1s\\0\\0\\7\\1s\\0\\24\\0\\0\\0org.freedesktop.DBus\\0', lsb=True)
-    [108, 4, 1, 1, 11, 2, [[1, '/org/freedesktop/DBus'], [2, 'org.freedesktop.DBus'], [3, 'NameAcquired'], [6, ':1.336'], [8, b's'], [7, 'org.freedesktop.DBus']]]
-
-    AddMatch call
-
-    >>> decode(b'yyyyuua(yv)', b'l\\1\\0\\1\\23\\0\\0\\0\\2\\0\\0\\0\\177\\0\\0\\0\\1\\1o\\0\\25\\0\\0\\0/org/freedesktop/DBus\\0\\0\\0\\6\\1s\\0\\24\\0\\0\\0org.freedesktop.DBus\\0\\0\\0\\0\\2\\1s\\0\\24\\0\\0\\0org.freedesktop.DBus\\0\\0\\0\\0\\3\\1s\\0\\10\\0\\0\\0AddMatch\\0\\0\\0\\0\\0\\0\\0\\0\\10\\1g\\0\\1s\\0', lsb=True)
-    [108, 1, 0, 1, 19, 2, [[1, '/org/freedesktop/DBus'], [6, 'org.freedesktop.DBus'], [2, 'org.freedesktop.DBus'], [3, 'AddMatch'], [8, b's']]]
-
-    AddMatch reply
-
-    >>> decode(b'yyyyuua(yv)', b'l\\2\\1\\1\\0\\0\\0\\0\\3\\0\\0\\0005\\0\\0\\0\\6\\1s\\0\\6\\0\\0\\0:1.336\\0\\0\\5\\1u\\0\\2\\0\\0\\0\\7\\1s\\0\\24\\0\\0\\0org.freedesktop.DBus\\0', lsb=True)
-    [108, 2, 1, 1, 0, 3, [[6, ':1.336'], [5, 2], [7, 'org.freedesktop.DBus']]]
-    >>> decode(b'yyyyuua(yv)',     b'l\\1\\0\\1\\23\\0\\0\\0\\2\\0\\0\\0\\217\\0\\0\\0\\1\\1o\\0\\25\\0\\0\\0/org/freedesktop/DBus\\0\\0\\0\\6\\1s\\0\\24\\0\\0\\0org.freedesktop.DBus\\0\\0\\0\\0\\2\\1s\\0\\24\\0\\0\\0org.freedesktop.DBus\\0\\0\\0\\0\\3\\1s\\0\\10\\0\\0\\0AddMatch\\0\\0\\0\\0\\0\\0\\0\\0\\10\\1g\\0\\1s\\0\\0\\7\\1s\\0\\6\\0\\0\\0:1.336\\0', lsb=True)
-    [108, 1, 0, 1, 19, 2, [[1, '/org/freedesktop/DBus'], [6, 'org.freedesktop.DBus'], [2, 'org.freedesktop.DBus'], [3, 'AddMatch'], [8, b's'], [7, ':1.336']]]
     """
     try:
         R, remain, bpos = _decode(sig, buffer, lsb=lsb, bpos=bpos)
@@ -223,6 +158,8 @@ class Variant(object):
     """
     def __init__(self, code, val):
         self.code, self.val = code, val
+    def __repr__(self):
+        return '%s(%s, %s)'%(self.__class__.__name__, self.code, self.val)
 
 class Signature(str, Variant):
     def __init__(self, val):
@@ -318,39 +255,6 @@ def _encode(sig, val, lsb=_sys_lsb, bpos=0):
 
 def encode(sig, val, lsb=_sys_lsb):
     """
-
-    Some basics
-
-    >>> encode(b'y', ord('y'), lsb=True)
-    b'y'
-    >>> encode(b'y', (ord('y'), ), lsb=True)
-    b'y'
-    >>> encode(b'yy', (ord('a'), ord('b')), lsb=True)
-    b'ab'
-    >>> encode(b'yb', (ord('a'), 0x01020304), lsb=True)
-    b'a\\x00\\x00\\x00\\x04\\x03\\x02\\x01'
-    >>> encode(b'yb', (ord('a'), 0x01020304), lsb=False)
-    b'a\\x00\\x00\\x00\\x01\\x02\\x03\\x04'
-    >>> encode(b'y(yy)', [97, [98, 99]], lsb=True)
-    b'a\\x00\\x00\\x00\\x00\\x00\\x00\\x00bc'
-    >>> encode(b'bayb', [1633837924, [49, 50, 51, 52], 1633837924], lsb=True)
-    b'dcba\\x04\\x00\\x00\\x001234dcba'
-    >>> encode(b'baayb', [1633837924, [[49, 50], [51, 52]], 1633837924], lsb=True)
-    b'dcba\\x0e\\x00\\x00\\x00\\x02\\x00\\x00\\x0012\\x00\\x00\\x02\\x00\\x00\\x0034\\x00\\x00dcba'
-
-    Actual DBus message headers
-    
-    Initial "Hello" call
-
-    >>> encode(b'yyyyuua(yv)', [108, 1, 0, 1, 0, 1, [[1, Object('/org/freedesktop/DBus')], [6, 'org.freedesktop.DBus'], [2, 'org.freedesktop.DBus'], [3, 'Hello']]], lsb=True)
-    b'l\\x01\\x00\\x01\\x00\\x00\\x00\\x00\\x01\\x00\\x00\\x00n\\x00\\x00\\x00\\x01\\x01o\\x00\\x15\\x00\\x00\\x00/org/freedesktop/DBus\\x00\\x00\\x00\\x06\\x01s\\x00\\x14\\x00\\x00\\x00org.freedesktop.DBus\\x00\\x00\\x00\\x00\\x02\\x01s\\x00\\x14\\x00\\x00\\x00org.freedesktop.DBus\\x00\\x00\\x00\\x00\\x03\\x01s\\x00\\x05\\x00\\x00\\x00Hello\\x00'
-
-    Hello reply
-
-    >>> encode(b'yyyyuua(yv)', [108, 2, 1, 1, 11, 1, [[6, ':1.336'], [5, Variant(b'u', 1)], [8, Signature('s')], [7, 'org.freedesktop.DBus']]], lsb=True)
-    b'l\\x02\\x01\\x01\\x0b\\x00\\x00\\x00\\x01\\x00\\x00\\x00=\\x00\\x00\\x00\\x06\\x01s\\x00\\x06\\x00\\x00\\x00:1.336\\x00\\x00\\x05\\x01u\\x00\\x01\\x00\\x00\\x00\\x08\\x01g\\x00\\x01s\\x00\\x00\\x07\\x01s\\x00\\x14\\x00\\x00\\x00org.freedesktop.DBus\\x00'
-    >>> encode(b'yyyyuua(yv)', [108, 4, 1, 1, 11, 2, [[1, Object('/org/freedesktop/DBus')], [2, 'org.freedesktop.DBus'], [3, 'NameAcquired'], [6, ':1.336'], [8, Signature('s')], [7, 'org.freedesktop.DBus']]], lsb=True)
-    b'l\\x04\\x01\\x01\\x0b\\x00\\x00\\x00\\x02\\x00\\x00\\x00\\x8d\\x00\\x00\\x00\\x01\\x01o\\x00\\x15\\x00\\x00\\x00/org/freedesktop/DBus\\x00\\x00\\x00\\x02\\x01s\\x00\\x14\\x00\\x00\\x00org.freedesktop.DBus\\x00\\x00\\x00\\x00\\x03\\x01s\\x00\\x0c\\x00\\x00\\x00NameAcquired\\x00\\x00\\x00\\x00\\x06\\x01s\\x00\\x06\\x00\\x00\\x00:1.336\\x00\\x00\\x08\\x01g\\x00\\x01s\\x00\\x00\\x07\\x01s\\x00\\x14\\x00\\x00\\x00org.freedesktop.DBus\\x00'
     """
     try:
         bufs, bpos = _encode(sig, val, lsb=lsb, bpos=0)
