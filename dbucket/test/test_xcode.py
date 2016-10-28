@@ -48,7 +48,7 @@ class TestXCode(unittest.TestCase):
 
     def test_decode(self):
         for sig, expect, inp in self.data:
-            actual = decode(sig, inp, lsb=True)
+            actual = decode(sig, inp, lsb=True, debug=True)
             self.assertEqual(actual, expect)
 
 class TestEncode(unittest.TestCase):
@@ -86,7 +86,7 @@ class TestDecode(unittest.TestCase):
 
     def test_decode(self):
         for sig, expect, inp in self.data:
-            actual = decode(sig, inp, lsb=True)
+            actual = decode(sig, inp, lsb=True, debug=True)
             self.assertEqual(actual, expect)
 
 class TestSigSplit(unittest.TestCase):
