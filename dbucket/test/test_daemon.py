@@ -1,7 +1,6 @@
 import unittest
 
 import asyncio, functools
-asyncio.get_event_loop().set_debug(True)
 
 from ..conn import DBUS, DBUS_PATH, RemoteError
 from ..auth import connect_bus, get_session_infos
@@ -14,7 +13,8 @@ class TestDBus(unittest.TestCase):
 
     def setUp(self):
         self.loop = asyncio.get_event_loop()
-        self.conn = self.loop.run_until_complete(connect_bus(get_session_infos()))
+        self.loop.set_debug(True)
+        self.conn = self.loop.run_until_complete(connect_bus(get_session_infos(), loop=self.loop))
         self.obj = SimpleProxy(self.conn,
                                name=DBUS,
                                interface=DBUS,
@@ -103,9 +103,9 @@ class TestDBus(unittest.TestCase):
         self.assertTrue(LOST._Q.empty())
         self.assertTrue(CHANGED._Q.empty())
 
-        ACQ.close()
-        LOST.close()
-        CHANGED.close()
+        yield from ACQ.close()
+        yield from LOST.close()
+        yield from CHANGED.close()
 
     @inloop
     @asyncio.coroutine

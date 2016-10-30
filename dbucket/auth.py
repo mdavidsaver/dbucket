@@ -49,12 +49,16 @@ def get_system_infos():
 
 _supported_methods = set(['EXTERNAL', 'ANONYMOUS'])
 
-def ConnectionFactory(W, R, info):
+def ConnectionFactory(W, R, info, *, loop=None, **kws):
     from .conn import Connection
-    return Connection(W, R, info)
+    return Connection(W, R, info, loop=loop, **kws)
 
 @asyncio.coroutine
-def connect_bus(infos, *, allowed_methods=_supported_methods, factory=ConnectionFactory):
+def connect_bus(infos, *,
+                allowed_methods=_supported_methods,
+                factory=ConnectionFactory,
+                loop=None,
+                **kws):
     """Accepts a sequence/generator of dictionaries describing possible bus endpoints.
     Tries to connect to each until one succeeds.  Returns a Connection
     or raises an exception
@@ -64,9 +68,9 @@ def connect_bus(infos, *, allowed_methods=_supported_methods, factory=Connection
         try:
             _log.debug('Trying bus %s', info)
             if 'unix:abstract' in info:
-                R, W = yield from asyncio.open_unix_connection('\0'+info['unix:abstract'])
+                R, W = yield from asyncio.open_unix_connection('\0'+info['unix:abstract'], loop=loop)
             elif 'unix:path' in info:
-                R, W = yield from asyncio.open_unix_connection(info['unix:path'])
+                R, W = yield from asyncio.open_unix_connection(info['unix:path'], loop=loop)
             else:
                 _log.debug('No supported transport: %s', info)
                 continue
@@ -115,13 +119,14 @@ def connect_bus(infos, *, allowed_methods=_supported_methods, factory=Connection
                 W.write(b'BEGIN\r\n')
 
             _log.debug('Authenticated with bus %s', info)
+
+            conn = factory(W, R, info, loop=loop, **kws)
         except:
             if R is not None and not R.transport.is_closing():
                 R.close()
             _log.exception("Can't attach to %s", info)
             continue
 
-        conn = factory(W, R, info)
         # Connection now has responsibility for call R.close()
         try:
             yield from conn.setup()

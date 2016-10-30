@@ -1,6 +1,6 @@
 
 import logging
-_log = logging.getLogger(__name__)
+#_log = logging.getLogger(__name__)
 
 import sys, struct
 from functools import partial
@@ -12,6 +12,9 @@ from .xcode import encode, decode, Object, Signature, Variant
 DBUS='org.freedesktop.DBus'
 # Path for DBUS daemon
 DBUS_PATH='/org/freedesktop/DBus'
+
+# Common error names
+UnknownMethod = 'org.freedesktop.DBus.Error.UnknownMethod'
 
 METHOD_CALL = 1
 METHOD_RETURN = 2
@@ -135,19 +138,19 @@ class Match(object):
         for N in ('sender', 'interface', 'member', 'path', 'destination'):
             M = getattr(self, N)
             if M is not None and M!=getattr(event, N):
-                _log.debug("Mis-match %s %s", self, event)
+                self.conn.log.debug("Mis-match %s %s", self, event)
                 return False
 
-        _log.debug("Match %s %s", self, event)
+        self.conn.log.debug("Match %s %s", self, event)
         try:
             self._Q.put_nowait((event, self._state))
             if self._state == self.OFLOW:
-                _log.debug("%s %s leaves overflow state", self.__class__.__name__, self._conds)
+                self.conn.log.debug("%s %s leaves overflow state", self.__class__.__name__, self._conds)
             self._state = self.NORMAL
             return True
         except asyncio.QueueFull:
             if self._state != self.OFLOW:
-                _log.debug("%s %s enters overflow state", self.__class__.__name__, self._conds)
+                self.conn.log.debug("%s %s enters overflow state", self.__class__.__name__, self._conds)
             self._state = self.OFLOW
             return False
 
@@ -159,7 +162,7 @@ class SignalMatch(Match):
     def _close(self):
         self.conn._signals.remove(self)
         if self.conn._running:
-            _log.debug('RemoveMatch: %s', self._expr)
+            self.conn.log.debug('RemoveMatch: %s', self._expr)
 
             try:
                 yield from self.call(interface='org.freedesktop.DBus',
@@ -168,11 +171,11 @@ class SignalMatch(Match):
                                     sig=b's',
                                     body=self._expr)
             except:
-                _log.exception("Error while RemoveMatch %s", self._conds)
+                self.conn.log.exception("Error while RemoveMatch %s", self._conds)
 
 class MethodMatch(Match):
     def done(self, evt, sig, body):
-        self.conn._return(evt, sig, body)
+        self.conn._method_return(evt, sig, body)
     def error(self, evt, sig, body):
         self.conn._error(evt, sig, body)
 
@@ -180,7 +183,8 @@ class Connection(object):
     # ignore/error all calls from peers
     ignore_calls = True
 
-    def __init__(self, W, R, info, loop=None):
+    def __init__(self, W, R, info, loop=None, name=None):
+        self.log = logging.getLogger(__name__) # replaced in setup
         self._W, self._R, self._info, self._loop = W, R, info, loop or asyncio.get_event_loop()
         self._running = True
 
@@ -207,7 +211,7 @@ class Connection(object):
         # join the receiver Task
         self._RX.cancel()
 
-        # join receiver task
+        # join receiver task, unless we are called from it
         if asyncio.Task.current_task() is not self._RX:
             yield from self._RX
 
@@ -249,7 +253,7 @@ class Connection(object):
             raise ConnectionClosed()
         M = SignalMatch(self, type='signal', **kws)
         self._signals.append(M)
-        _log.debug('AddMatch: %s %s',kws, M._expr)
+        self.log.debug('AddMatch: %s %s',kws, M._expr)
         try:
             yield from self.call(interface=DBUS,
                                  destination=DBUS,
@@ -267,38 +271,29 @@ class Connection(object):
             raise ConnectionClosed()
         M = MethodMatch(self, type='method_call', **kws)
         self._calls.append(M)
-        _log.debug('AddCall: %s', M._expr)
+        self.log.debug('AddCall: %s', M._expr)
         #TODO: need AddMatch w/ type='method_call' ??
         return M
 
     def get_sn(self):
         SN = self._nextsn
-        self._nextsn = SN+1
+        self._nextsn = (SN+1)&0xffffffff
         return SN
 
     def _send(self, header, body):
-        try:
-            _log.debug("send head %s", header)
-            self._W.write(header)
             M = len(header)%8
-            if M:
-                self._W.write(b'\0'*(8-M))
-            _log.debug("send body %s", body)
-            self._W.write(body)
-
-        except:
-            # failure at this point may mean part of the message is queued,
-            # so we must close the connection
-            self.close() #TODO: wait for completion???
-            raise
-
+            pad = b'\0'*(8-M) if M else b''
+            S = [header, pad, body]
+            self._W.writelines(S)
+            #self.log.debug("send message %s %s", header, body)
+ 
     def call(self, *, path=None, interface=None, member=None, destination=None, sig=None, body=None):
         assert path is not None, "Method calls require path="
         assert member is not None, "Method calls require member="
         assert sig is None or isinstance(sig, str), "Signature must be str (or None)"
         if not self._running:
             raise ConnectionClosed()
-        _log.debug('call %s', (path, interface, member, destination, sig, body))
+        self.log.debug('call %s', (path, interface, member, destination, sig, body))
 
         SN = self.get_sn()
 
@@ -310,40 +305,42 @@ class Connection(object):
             opts.append([2, interface])
         if destination is not None:
             opts.append([6, destination])
+
         if sig is not None:
-            body = encode(sig.encode('ascii'), body)
+            bodystr = encode(sig.encode('ascii'), body)
             opts.append([8, Signature(sig)])
         else:
-            body = b''
+            bodystr = b''
 
-        req = [ord(_sys_L), METHOD_CALL, 0, 1,   len(body), SN,   opts]
+        req = [ord(_sys_L), METHOD_CALL, 0, 1,   len(bodystr), SN,   opts]
+        self.log.debug("call message %s %s", req, bodystr)
         header = encode(b'yyyyuua(yv)', req)
 
         ret = asyncio.Future(loop=self._loop)
         self._inprog[SN] = ret
-        self._send(header, body)
+        self._send(header, bodystr)
         return ret
 
     def _method_return(self, event, sig, body):
-        opts [
-            (5, Variant(b'b', event.serial)),
+        self.log.debug("return %s %s %s", event, sig, body)
+        opts = [
+            (5, Variant(b'u', event.serial)),
             (6, event.sender), # destination
         ]
         if body is not None:
-            if not isinstance(sig, bytes):
+            if sig is None:
                 raise ValueError("body w/o sig")
             opts.append((8, Signature(sig)))
+            bodystr = encode(sig.encode('ascii'), body)
         else:
-            body = b''
+            bodystr = b''
         if not self._running:
             return
-        _log.debug("return %s %s %s", event, sig, body)
-        
-        SN = self.get_sn()
 
-        msg = [ord(_sys_L), METHOD_RETURN, 0, 1,   len(body), SN,   opts]
+        msg = [ord(_sys_L), METHOD_RETURN, 0, 1,   len(bodystr), self.get_sn(),   opts]
+        self.log.debug("return message %s %s", msg, bodystr)
         header = encode(b'yyyyuua(yv)', msg)
-        self._send(header, body)
+        self._send(header, bodystr)
 
     def _error(self, event, name, msg):
         opts = [
@@ -355,9 +352,10 @@ class Connection(object):
         if not self._running:
             return
         
-        _log.debug("error %s %s %s", event, name, msg)
+        self.log.debug("error %s %s %s", event, name, msg)
         body = msg or name
         msg = [ord(_sys_L), ERROR, 0, 1,   len(body), self.get_sn(),   opts]
+        self.log.debug("error message %s %s", msg, body)
         header = encode(b'yyyyuua(yv)', msg)
         body = encode(b's', body)
         self._send(header, body)
@@ -372,7 +370,7 @@ class Connection(object):
                 #   yyyyuuu
                 # to get body and header array sizes to compute the size of the complete message
                 head = yield from self._R.readexactly(16)
-                _log.debug("Header %s", repr(head))
+                #self.log.debug("Header %s", repr(head))
 
                 # validate byte order and version
                 if head[0] not in (ord(b'l'), ord(b'B')) or head[3]!=1:
@@ -392,15 +390,15 @@ class Connection(object):
                 bstart = ((hlen+7)&~7)
                 # no padding after body
                 fullsize = bstart + blen
-                _log.debug('Remainder hlen=%d bstart=%d blen=%d, fullsize=%d', hlen, bstart, blen, fullsize)
+                #self.log.debug('Remainder hlen=%d bstart=%d blen=%d, fullsize=%d', hlen, bstart, blen, fullsize)
 
                 rest = yield from self._R.readexactly(fullsize)
                 headers, body = head+rest[:hlen], rest[bstart:]
-                _log.debug('Raw Headers=%s body=%s', headers, body)
+                #self.log.debug('Raw Headers=%s body=%s', headers, body)
 
                 # decode full header, but discard parts already handled
-                headers = decode(b'yyyyuua(yv)', headers, lsb=lsb)
-                headers = headers[-1]
+                fullheaders = decode(b'yyyyuua(yv)', headers, lsb=lsb)
+                headers = fullheaders[-1]
 
                 # transform headers into array
                 H = [None]*10
@@ -408,7 +406,7 @@ class Connection(object):
                     if code<len(H):
                         H[code] = val
                 headers = H
-                _log.debug('Headers %s', headers)
+                #self.log.debug('Headers %s', headers)
                 del H
 
                 # decode body if provided
@@ -417,7 +415,7 @@ class Connection(object):
                     body = decode(sig, body, lsb=lsb)
                 else:
                     body = None
-                _log.debug('Body %s', body)
+                self.log.debug('recv message %s %s', fullheaders, body)
 
                 if mtype==METHOD_CALL:
                     evt = BusEvent(sn, headers, body)
@@ -427,14 +425,14 @@ class Connection(object):
                                 evt = None # consumed
                                 break
                     if evt is not None:
-                        self._error(evt, 'org.freedesktop.DBus.Error.UnknownMethod', "No one cared")
+                        self._error(evt, UnknownMethod, "No one cared")
                         
                 elif mtype in (METHOD_RETURN, ERROR): 
                     rsn = headers[5]
                     try:
                         F = self._inprog[rsn]
                     except KeyError:
-                        _log.warn('Received reply/error with unknown S/N %s', rsn)
+                        self.log.warn('Received reply/error with unknown S/N %s', rsn)
                     else:
                         if not F.cancelled():
                             if mtype==2:
@@ -448,14 +446,14 @@ class Connection(object):
                         used |= M._emit(evt)
                     if not used:
                         # this may happen naturally due to races with RemoveMatch
-                       _log.debug("Ignored signal %s %s %s %s", headers)
+                       self.log.debug("Ignored signal %s %s %s %s", headers)
                 else:
-                    _log.debug('Ignoring unknown dbus message type %s', mtype)
+                    self.log.debug('Ignoring unknown dbus message type %s', mtype)
 
         except (asyncio.IncompleteReadError, asyncio.CancelledError):
             return # connection closed
         except:
-            _log.exception('Error in Connnection RX')
+            self.log.exception('Error in Connnection RX')
             self._W.close()
             self._running = False
 
@@ -471,19 +469,19 @@ class Connection(object):
                     return
                 elif state==Match.OFLOW:
                     if last_state==Match.NORMAL:
-                        _log.warn('Missed some dbus daemon signals')
+                        self.log.warn('Missed some dbus daemon signals')
                 last_state = state
 
                 if event.member=='NameAcquired':
                     if self._name is None:
                         self._name = event.body
-                    _log.debug("NameAcquired: %s", event.body)
+                    self.log.debug("NameAcquired: %s", event.body)
                     self._names.add(event.body)
                         
                 else:
-                    _log.info("daemon signal %s", event)
+                    self.log.info("daemon signal %s", event)
             except:
-                _log.exception("Error handling dbus daemon signal")
+                self.log.exception("Error handling dbus daemon signal")
                 yield from asyncio.sleep(10)
 
     @asyncio.coroutine
@@ -500,3 +498,5 @@ class Connection(object):
         # at this point the 'NameAcquired' signal may already be delivered
         assert self._name in (hello, None), (self._name, hello)
         self._name = hello
+
+        self.log = logging.getLogger(__name__+hello)

@@ -1,4 +1,4 @@
-
+import logging
 import unittest
 import asyncio
 asyncio.get_event_loop().set_debug(True)
@@ -10,6 +10,7 @@ class FakeConnection(object):
         self._loop = asyncio.get_event_loop()
         self._running = False
         self._signals = []
+        self.log = logging.getLogger(__name__)
 
 class TestSignalMatch(unittest.TestCase):
     def setUp(self):
