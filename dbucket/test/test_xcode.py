@@ -34,6 +34,10 @@ class TestXCode(unittest.TestCase):
         # array
         (b'yayb', [99, [49, 50, 51, 52], 1633837924],
                   b'c\x00\x00\x00\x04\x00\x00\x001234dcba'),
+
+        # Message body w/ string only
+        (b's', 'No one cared', b'\x0c\x00\x00\x00No one cared\x00'),
+
         # Hello method call
         (b'yyyyuua(yv)',
            [108, 1, 0, 1, 0, 1, [[1, Object('/org/freedesktop/DBus')], [6, 'org.freedesktop.DBus'], [2, 'org.freedesktop.DBus'], [3, 'Hello']]],

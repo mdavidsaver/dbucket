@@ -36,6 +36,8 @@ class TestDBus(unittest.TestCase):
         names = yield from self.obj.call(member='ListNames')
         # list should include me
         self.assertIn(self.conn.name, names)
+        # list should include the daemon
+        self.assertIn(DBUS, names)
 
     @inloop
     @asyncio.coroutine

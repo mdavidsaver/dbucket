@@ -285,7 +285,7 @@ class Connection(object):
             pad = b'\0'*(8-M) if M else b''
             S = [header, pad, body]
             self._W.writelines(S)
-            #self.log.debug("send message %s %s", header, body)
+            self.log.debug("send message serialized %s", S)
  
     def call(self, *, path=None, interface=None, member=None, destination=None, sig=None, body=None):
         assert path is not None, "Method calls require path="
@@ -353,11 +353,10 @@ class Connection(object):
             return
         
         self.log.debug("error %s %s %s", event, name, msg)
-        body = msg or name
+        body = encode(b's', msg or name)
         msg = [ord(_sys_L), ERROR, 0, 1,   len(body), self.get_sn(),   opts]
         self.log.debug("error message %s %s", msg, body)
         header = encode(b'yyyyuua(yv)', msg)
-        body = encode(b's', body)
         self._send(header, body)
 
     @asyncio.coroutine
