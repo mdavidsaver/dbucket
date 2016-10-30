@@ -5,12 +5,7 @@ asyncio.get_event_loop().set_debug(True)
 
 from ..conn import SignalMatch, BusEvent
 
-class FakeConnection(object):
-    def __init__(self):
-        self._loop = asyncio.get_event_loop()
-        self._running = False
-        self._signals = []
-        self.log = logging.getLogger(__name__)
+from .util import FakeConnection
 
 class TestSignalMatch(unittest.TestCase):
     def setUp(self):

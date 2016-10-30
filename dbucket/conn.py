@@ -319,8 +319,6 @@ class Connection(object):
             raise ConnectionClosed()
         self.log.debug('call %s', (path, interface, member, destination, sig, body))
 
-        SN = self.get_sn()
-
         opts = [
             [1, Object(path)],
             [3, member],
@@ -336,6 +334,7 @@ class Connection(object):
         else:
             bodystr = b''
 
+        SN = self.get_sn()
         req = [ord(_sys_L), METHOD_CALL, 0, 1,   len(bodystr), SN,   opts]
         self.log.debug("call message %s %s", req, bodystr)
         header = encode(b'yyyyuua(yv)', req)
