@@ -1,0 +1,18 @@
+Build dbus from source with '--enable-verbose-mode',
+then run
+
+DBUS_VERBOSE=1 dbus-run-session --dbus-daemon=<path/to/dbus-daemon> -- nosetests3
+
+```
+3284: [dbus/dbus-transport.c(1185):_dbus_transport_queue_messages] Corrupted message stream, disconnecting
+```
+
+Look for earlier message about validation failure
+
+
+```
+3284: [dbus/dbus-message.c(4168):load_message] Failed to validate message body code 35
+```
+
+See dbus/dbus-marshal-validate.h for message validation code (eg 35==DBUS_INVALID_LENGTH_OUT_OF_BOUNDS)
+
