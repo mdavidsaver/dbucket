@@ -92,3 +92,27 @@ class TestDBus(unittest.TestCase):
             _log.info("result received")
             yield from CALL.close()
             yield from T
+
+    @inloop
+    @asyncio.coroutine
+    def test_signal(self):
+        SIG = yield from self.client.AddMatch(
+            interface=self.servname,
+            path=self.servpath,
+            member='Testing',
+        )
+
+        self.server.signal(
+            interface=self.servname,
+            path=self.servpath,
+            member='Testing',
+            sig='s',
+            body='one',
+        )
+
+        evt, sts = yield from SIG.recv()
+        self.assertEqual(evt.body, 'one')
+
+        self.assertTrue(SIG._Q.empty())
+
+        yield from SIG.close()

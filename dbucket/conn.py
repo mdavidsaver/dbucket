@@ -183,6 +183,9 @@ class Connection(object):
     # ignore/error all calls from peers
     ignore_calls = True
 
+    # whether to log message byte strings (very verbose)
+    debug_net = False
+
     def __init__(self, W, R, info, loop=None, name=None):
         self.log = logging.getLogger(__name__) # replaced in setup
         self._W, self._R, self._info, self._loop = W, R, info, loop or asyncio.get_event_loop()
@@ -195,6 +198,8 @@ class Connection(object):
 
         self._nextsn = 1 #TODO: randomize?
         self._RX = self._loop.create_task(self._recv())
+
+        # my primary bus name, and the set of well known names I have acquired
         self._name, self._names = None, set()
 
         # use Match instead of SignalMatch as AddMatch for daemon signals is implied
@@ -247,8 +252,16 @@ class Connection(object):
         'All my names'
         return self._names
 
+    @property
+    def running(self):
+        return self._running
+
     @asyncio.coroutine
     def AddMatch(self, **kws):
+        if 'sender' in kws and kws['sender']!=DBUS and kws['sender'][0]!=':':
+            # signals are always delivered with sender= set to the unique bus name of the orginator,
+            # except for message from the dbus daemon.
+            raise ValueError("AddMatch with sender='%s' isn't meaningful with well-known names"%kws['sender'])
         if not self._running:
             raise ConnectionClosed()
         M = SignalMatch(self, type='signal', **kws)
@@ -285,7 +298,8 @@ class Connection(object):
             pad = b'\0'*(8-M) if M else b''
             S = [header, pad, body]
             self._W.writelines(S)
-            self.log.debug("send message serialized %s", S)
+            if self.debug_net:
+                self.log.debug("send message serialized %s", S)
  
     def call(self, *, path=None, interface=None, member=None, destination=None, sig=None, body=None):
         assert path is not None, "Method calls require path="
@@ -320,6 +334,31 @@ class Connection(object):
         self._inprog[SN] = ret
         self._send(header, bodystr)
         return ret
+
+    def signal(self, *, path=None, interface=None, member=None, destination=None, sig=None, body=None):
+        if not self._running:
+            return
+        self.log.debug('signal %s', (path, interface, member, destination, sig, body))
+
+        opts = [
+            (1, Object(path)),
+            (2, interface),
+            (3, member),
+        ]
+        if destination is not None:
+            opts.append([6, destination])
+
+        if sig is not None:
+            bodystr = encode(sig.encode('ascii'), body)
+            opts.append([8, Signature(sig)])
+        else:
+            bodystr = b''
+
+        req = [ord(_sys_L), SIGNAL, 0, 1,  len(bodystr), self.get_sn(),   opts]
+        self.log.debug("signal message %s %s", req, bodystr)
+        header = encode(b'yyyyuua(yv)', req)
+        self._send(header, bodystr)
+
 
     def _method_return(self, event, sig, body):
         self.log.debug("return %s %s %s", event, sig, body)
@@ -392,6 +431,8 @@ class Connection(object):
                 #self.log.debug('Remainder hlen=%d bstart=%d blen=%d, fullsize=%d', hlen, bstart, blen, fullsize)
 
                 rest = yield from self._R.readexactly(fullsize)
+                if self.debug_net:
+                    self.log.debug("recv message", rest)
                 headers, body = head+rest[:hlen], rest[bstart:]
                 #self.log.debug('Raw Headers=%s body=%s', headers, body)
 
@@ -445,7 +486,7 @@ class Connection(object):
                         used |= M._emit(evt)
                     if not used:
                         # this may happen naturally due to races with RemoveMatch
-                       self.log.debug("Ignored signal %s %s %s %s", headers)
+                       self.log.debug("Ignored signal %s", evt)
                 else:
                     self.log.debug('Ignoring unknown dbus message type %s', mtype)
 
@@ -476,7 +517,12 @@ class Connection(object):
                         self._name = event.body
                     self.log.debug("NameAcquired: %s", event.body)
                     self._names.add(event.body)
-                        
+
+                elif event.member=='NameLost':
+                    if event.body not in self._names:
+                        self.log.warn("I've lost a name (%s) I didn't think I head?", event.body)
+                    self._names.discard(event.body)
+
                 else:
                     self.log.info("daemon signal %s", event)
             except:
