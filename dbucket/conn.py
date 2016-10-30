@@ -13,6 +13,8 @@ DBUS='org.freedesktop.DBus'
 # Path for DBUS daemon
 DBUS_PATH='/org/freedesktop/DBus'
 
+INTROSPECTABLE='org.freedesktop.DBus.Introspectable'
+
 # Common error names
 UnknownMethod = 'org.freedesktop.DBus.Error.UnknownMethod'
 
@@ -73,6 +75,8 @@ class Match(object):
         self._state = self.NORMAL
         # item Q'd (headers, body, status)
         self._Q = asyncio.Queue(maxsize=kws.pop('qsize', 4), loop=conn._loop)
+        # delgate Q state info
+        self.empty, self.full, self.qsize = self._Q.empty, self._Q.full, self._Q.qsize
         if not hasattr(self._Q, 'task_done'):
             # added in python 3.4.4
             self._Q.task_done = lambda:None
@@ -103,6 +107,13 @@ class Match(object):
         self._Q.task_done()
         return R
 
+    def poll(self):
+        if self._expr is None:
+            raise ConnectionClosed()
+        R = self._Q.get_nowait()
+        self._Q.task_done()
+        return R
+
     @asyncio.coroutine
     def _close(self):
         pass
@@ -124,7 +135,7 @@ class Match(object):
         yield from self._Q.put((None, self.DONE)) # waits if _Q is full
 
         if hasattr(self._Q, 'join'):
-            # added in 3.4.4
+            # join() added in 3.4.4
             #TODO: join here?  could easily deadlock
             #yield from self._Q.join()
             pass
@@ -285,7 +296,6 @@ class Connection(object):
         M = MethodMatch(self, type='method_call', **kws)
         self._calls.append(M)
         self.log.debug('AddCall: %s', M._expr)
-        #TODO: need AddMatch w/ type='method_call' ??
         return M
 
     def get_sn(self):

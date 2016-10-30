@@ -2,7 +2,7 @@ import unittest
 
 import asyncio, functools
 
-from ..conn import DBUS, DBUS_PATH, RemoteError
+from ..conn import DBUS, DBUS_PATH, INTROSPECTABLE, RemoteError
 from ..auth import connect_bus, get_session_infos
 from ..proxy import SimpleProxy
 from .util import inloop
@@ -122,3 +122,17 @@ class TestDBus(unittest.TestCase):
             import trackback
             trackback.print_exc()
             self.fail("Unexpected exception type")
+
+    @inloop
+    @asyncio.coroutine
+    def test_introspect(self):
+        msg = yield from self.conn.call(
+                               destination=DBUS,
+                               interface=INTROSPECTABLE,
+                               path=DBUS_PATH,
+                               member='Introspect',
+        )
+
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(msg)
+        self.assertEqual(root.tag, 'node')
