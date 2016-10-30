@@ -18,7 +18,7 @@ _sys_lsb = sys.byteorder=='little'
 def _next_type(sig):
     """ Split type signature after first element (POD, array, or sub-struct)
     """
-    assert isinstance(sig, bytes)
+    assert isinstance(sig, bytes), 'Signature must be bytes'
     pos, depth = 0, 0
     while pos<len(sig):
         C = sig[pos]
@@ -264,5 +264,6 @@ def encode(sig, val, lsb=_sys_lsb):
     try:
         bufs, bpos = _encode(sig, val, lsb=lsb, bpos=0)
     except Exception as e:
-        raise ValueError("Error %s while encoding %s with %s"%(e, sig, val))
+        _log.exception('oops')
+        raise ValueError("Error '%s' while encoding %s with (%s) %s"%(e, sig, type(val), repr(val)))
     return b''.join(bufs)

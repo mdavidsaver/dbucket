@@ -6,7 +6,7 @@ import sys, struct
 from functools import partial
 import asyncio
 
-from .xcode import encode, decode, Object, Signature
+from .xcode import encode, decode, Object, Signature, Variant
 
 # Name and Interface for DBUS daemon
 DBUS='org.freedesktop.DBus'
@@ -48,7 +48,8 @@ class BusEvent(object):
         self.destination = headers[6]
         self.sender = headers[7]
     def __repr__(self):
-        return "%s(%s)"%(self.__class__.__name__, self.__dict__)
+        S = ','.join(["%s='%s'"%(K,V) for K,V in self.__dict__.items()])
+        return "%s(%s)"%(self.__class__.__name__, S)
 
 class Match(object):
     """Queue of received bus events (METHOD_CALL or SIGNAL)
@@ -68,7 +69,7 @@ class Match(object):
     def __init__(self, conn, **kws):
         self._state = self.NORMAL
         # item Q'd (headers, body, status)
-        self._Q = asyncio.Queue(maxsize=kws.get('qsize', 4), loop=conn._loop)
+        self._Q = asyncio.Queue(maxsize=kws.pop('qsize', 4), loop=conn._loop)
         if not hasattr(self._Q, 'task_done'):
             # added in python 3.4.4
             self._Q.task_done = lambda:None
@@ -76,11 +77,12 @@ class Match(object):
 
         # build match expression (eg. "interface='foo.bar',member='baz'")
         match = self._conds = []
-        for name in ('sender', 'interface', 'member', 'path', 'destination'):
-            V = kws.get(name)
+        for name in ('sender', 'interface', 'member', 'path', 'destination', 'type'):
+            V = kws.pop(name, None)
             setattr(self, name, V)
             if V is not None:
                 match.append((name, str(V)))
+        assert len(kws)==0, ('Unknown keyword arguments', kws)
         #TODO: escape "'" and "\'
         self._expr = ','.join(["%s='%s'"%(K,V) for K,V in match])
 
@@ -98,6 +100,7 @@ class Match(object):
         self._Q.task_done()
         return R
 
+    @asyncio.coroutine
     def _close(self):
         pass
 
@@ -109,15 +112,19 @@ class Match(object):
         """
         if self._expr is None:
             return
+
         self._expr = None
         self._state = self.DONE
 
-        self._close()
+        yield from self._close()
 
-        self.conn._signals.remove(self)
-        yield from self._Q.put((None, self.DONE))
+        yield from self._Q.put((None, self.DONE)) # waits if _Q is full
 
-        yield from self._Q.join()
+        if hasattr(self._Q, 'join'):
+            # added in 3.4.4
+            #TODO: join here?  could easily deadlock
+            #yield from self._Q.join()
+            pass
 
     def _emit(self, event):
         if self._expr is None:
@@ -128,8 +135,10 @@ class Match(object):
         for N in ('sender', 'interface', 'member', 'path', 'destination'):
             M = getattr(self, N)
             if M is not None and M!=getattr(event, N):
+                _log.debug("Mis-match %s %s", self, event)
                 return False
 
+        _log.debug("Match %s %s", self, event)
         try:
             self._Q.put_nowait((event, self._state))
             if self._state == self.OFLOW:
@@ -142,8 +151,13 @@ class Match(object):
             self._state = self.OFLOW
             return False
 
-class SignalMatch(object):
+    def __repr__(self):
+        return "%s(%s)"%(self.__class__.__name__, self._expr)
+
+class SignalMatch(Match):
+    @asyncio.coroutine
     def _close(self):
+        self.conn._signals.remove(self)
         if self.conn._running:
             _log.debug('RemoveMatch: %s', self._expr)
 
@@ -156,7 +170,7 @@ class SignalMatch(object):
             except:
                 _log.exception("Error while RemoveMatch %s", self._conds)
 
-class MethodMatch(object):
+class MethodMatch(Match):
     def done(self, evt, sig, body):
         self.conn._return(evt, sig, body)
     def error(self, evt, sig, body):
@@ -179,6 +193,7 @@ class Connection(object):
         self._RX = self._loop.create_task(self._recv())
         self._name, self._names = None, set()
 
+        # use Match instead of SignalMatch as AddMatch for daemon signals is implied
         self._bus_signals = Match(self, qsize=20, sender=DBUS, path=DBUS_PATH, interface=DBUS)
         self._signals.append(self._bus_signals)
         self._SIGS = self._loop.create_task(self._bus_sig())
@@ -220,21 +235,28 @@ class Connection(object):
 
     @property
     def name(self):
+        'My primary bus name'
         return self._name
+
+    @property
+    def names(self):
+        'All my names'
+        return self._names
 
     @asyncio.coroutine
     def AddMatch(self, **kws):
         if not self._running:
             raise ConnectionClosed()
-        M = SignalMatch(self, **kws)
+        M = SignalMatch(self, type='signal', **kws)
         self._signals.append(M)
-        _log.debug('AddMatch: %s', M._expr)
+        _log.debug('AddMatch: %s %s',kws, M._expr)
         try:
-            yield from self.call(interface='org.freedesktop.DBus',
-                                member='AddMatch',
-                                destination='org.freedesktop.DBus',
-                                sig=b's',
-                                body=M._expr)
+            yield from self.call(interface=DBUS,
+                                 destination=DBUS,
+                                 path=DBUS_PATH,
+                                 member='AddMatch',
+                                 sig='s',
+                                 body=M._expr)
         except:
             self._signals.remove(M)
             raise
@@ -243,7 +265,7 @@ class Connection(object):
     def AddCall(self, **kws):
         if not self._running:
             raise ConnectionClosed()
-        M = MethodMatch(self, **kws)
+        M = MethodMatch(self, type='method_call', **kws)
         self._calls.append(M)
         _log.debug('AddCall: %s', M._expr)
         #TODO: need AddMatch w/ type='method_call' ??
@@ -270,9 +292,10 @@ class Connection(object):
             self.close() #TODO: wait for completion???
             raise
 
-    def call(self, path=None, interface=None, member=None, destination=None, sig=None, body=None):
+    def call(self, *, path=None, interface=None, member=None, destination=None, sig=None, body=None):
         assert path is not None, "Method calls require path="
         assert member is not None, "Method calls require member="
+        assert sig is None or isinstance(sig, str), "Signature must be str (or None)"
         if not self._running:
             raise ConnectionClosed()
         _log.debug('call %s', (path, interface, member, destination, sig, body))
@@ -288,7 +311,7 @@ class Connection(object):
         if destination is not None:
             opts.append([6, destination])
         if sig is not None:
-            body = encode(sig, body)
+            body = encode(sig.encode('ascii'), body)
             opts.append([8, Signature(sig)])
         else:
             body = b''
@@ -304,6 +327,7 @@ class Connection(object):
     def _method_return(self, event, sig, body):
         opts [
             (5, Variant(b'b', event.serial)),
+            (6, event.sender), # destination
         ]
         if body is not None:
             if not isinstance(sig, bytes):
@@ -321,18 +345,21 @@ class Connection(object):
         header = encode(b'yyyyuua(yv)', msg)
         self._send(header, body)
 
-    def _error(self, event, err):
-        opts [
-            (5, Variant(b'b', event.serial)),
-            (4, String(err)),
+    def _error(self, event, name, msg):
+        opts = [
+            (4, str(name)), # error name
+            (5, Variant(b'u', event.serial)),
+            (6, event.sender), # destination
+            (8, Signature('s')),
         ]
         if not self._running:
             return
-        body = b''
-        _log.debug("error %s %s %s", event, sig, body)
-
-        msg = [ord(_sys_L), ERROR, 0, 1,   len(body), SN,   opts]
+        
+        _log.debug("error %s %s %s", event, name, msg)
+        body = msg or name
+        msg = [ord(_sys_L), ERROR, 0, 1,   len(body), self.get_sn(),   opts]
         header = encode(b'yyyyuua(yv)', msg)
+        body = encode(b's', body)
         self._send(header, body)
 
     @asyncio.coroutine
@@ -400,7 +427,7 @@ class Connection(object):
                                 evt = None # consumed
                                 break
                     if evt is not None:
-                        self._error(evt, "No one cared")
+                        self._error(evt, 'org.freedesktop.DBus.Error.UnknownMethod', "No one cared")
                         
                 elif mtype in (METHOD_RETURN, ERROR): 
                     rsn = headers[5]
