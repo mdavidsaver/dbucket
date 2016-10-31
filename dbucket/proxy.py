@@ -2,6 +2,9 @@
 import asyncio
 import xml.etree.ElementTree as ET
 
+INTROSPECTABLE='org.freedesktop.DBus.Introspectable'
+
+
 class SimpleProxy(object):
     """Simple proxy object around a connection for a single (destination, path, interface)
     """
@@ -38,6 +41,14 @@ class ProxyBase(object):
         self._dbus_destination = destination
         self._dbus_path = path
 
+    @asyncio.coroutine
+    def setup(self):
+        for name, doc in self._dbus_signals:
+            M = SignalManager(self, name)
+            M.__doc__ = doc
+            setattr(self, name, M)
+        return self
+
 def makeCall(mname, sig, nargs):
     if nargs==0:
         @asyncio.coroutine
@@ -60,9 +71,22 @@ def makeCall(mname, sig, nargs):
                 sig=sig,
                 body=args
             ))
+    meth._dbus_method = mname
     meth._dbus_sig = sig
     meth._dbus_nargs = nargs
     return meth
+
+class SignalManager(object):
+    def __init__(self, proxy, signame):
+        self.proxy, self.signame = proxy, signame
+    @asyncio.coroutine
+    def connect(self):
+        return (yield from self.proxy._dbus_connection.AddMatch(
+            #sender=self.proxy._dbus_destination, #TODO track well-known names and check this?
+            path=self.proxy._dbus_path,
+            interface=self.proxy._dbus_interface,
+            member=self.signame,
+        ))
 
 def buildProxy(xml, *, interface=None):
     node = xml.find("interface[@name='%s']"%interface)
@@ -88,7 +112,7 @@ def buildProxy(xml, *, interface=None):
 
         meth = makeCall(name, ''.join(sig), len(sig))
         meth.__name__ = name
-        meth.__doc__ = '{ret} = {name}({arg})\n\n{xml}'.format(
+        meth.__doc__ = '{ret} = {name}({arg})\n========================\n{xml}'.format(
             ret = ', '.join(ret),
             arg = ', '.join(sig),
             name = name,
@@ -96,4 +120,36 @@ def buildProxy(xml, *, interface=None):
         )
         klass[name] = meth
 
+    sigs = []
+    for snode in node.findall('signal'):
+        """<signal name="NameOwnerChanged">
+            <arg type="s"/>
+            <arg type="s"/>
+            <arg type="s"/>
+           </signal>
+        """
+        name = snode.attrib['name']
+        doc = 'signal {name} -> {sig}\n========================\n{xml}'.format(
+            name = name,
+            sig = ''.join([N.attrib['type'] for N in snode.findall('arg')]),
+            xml = ET.tostring(snode),
+        )
+        sigs.append((name, doc))
+    klass['_dbus_signals'] = sigs
+
     return type(interface.replace('.','_'), (ProxyBase,), klass)
+
+@asyncio.coroutine
+def createProxy(conn, *, destination=None, path=None, interface=None):
+    raw = yield from conn.call(
+        destination=destination,
+        path=path,
+        interface=INTROSPECTABLE,
+        member='Introspect',
+    )
+
+    #TODO: cache klass?
+    root = ET.fromstring(raw)
+    klass = buildProxy(root, interface=interface)
+
+    return (yield from klass(conn, destination=destination, path=path).setup())

@@ -8,6 +8,9 @@ def inloop(fn):
     @functools.wraps(fn)
     def testmethod(self):
         F = fn(self)
+        if not hasattr(self, 'loop'):
+            self.loop = asyncio.get_event_loop()
+            self.loop.set_debug(True)
         timeout = getattr(self, 'timeout', None)
         if timeout is not None:
             F = asyncio.wait_for(F, timeout)

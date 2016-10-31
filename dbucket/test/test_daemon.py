@@ -4,21 +4,28 @@ import asyncio, functools
 
 from ..conn import DBUS, DBUS_PATH, INTROSPECTABLE, RemoteError
 from ..auth import connect_bus, get_session_infos
-from ..proxy import SimpleProxy
+from ..proxy import SimpleProxy, createProxy
 from .util import inloop
 
 class TestDBus(unittest.TestCase):
     'Talking to the dbus daemon'
     timeout = 1.0
 
+    @inloop
+    @asyncio.coroutine
     def setUp(self):
-        self.loop = asyncio.get_event_loop()
-        self.loop.set_debug(True)
-        self.conn = self.loop.run_until_complete(connect_bus(get_session_infos(), loop=self.loop))
+        self.conn = yield from connect_bus(get_session_infos(), loop=self.loop)
+        # proxy for dbus daemon
         self.obj = SimpleProxy(self.conn,
                                name=DBUS,
                                interface=DBUS,
                                path=DBUS_PATH,
+        )
+        # another proxy for the dbus daemon (generated)
+        self.obj2 = yield from createProxy(self.conn,
+                               destination=DBUS,
+                               path=DBUS_PATH,
+                               interface=DBUS,
         )
 
     @inloop
@@ -33,7 +40,7 @@ class TestDBus(unittest.TestCase):
     @inloop
     @asyncio.coroutine
     def test_ListNames(self):
-        names = yield from self.obj.call(member='ListNames')
+        names = yield from self.obj2.ListNames()
         # list should include me
         self.assertIn(self.conn.name, names)
         # list should include the daemon
@@ -46,21 +53,11 @@ class TestDBus(unittest.TestCase):
         """
         myname = 'foo.bar'
 
-        ACQ = yield from self.obj.AddMatch(
-            member='NameAcquired',
-        )
-        LOST = yield from self.obj.AddMatch(
-            member='NameLost',
-        )
-        CHANGED = yield from self.obj.AddMatch(
-            member='NameOwnerChanged',
-        )
+        ACQ =     yield from self.obj2.NameAcquired.connect()
+        LOST =    yield from self.obj2.NameLost.connect()
+        CHANGED = yield from self.obj2.NameOwnerChanged.connect()
 
-        ret = yield from self.obj.call(
-            member='RequestName',
-            sig='su',
-            body=(myname, 4), # Don't Queue
-        )
+        ret = yield from self.obj2.RequestName(myname, 4) # Don't Queue
 
         evt, sts = yield from ACQ.recv()
         self.assertEqual(evt.body, myname)
@@ -71,18 +68,13 @@ class TestDBus(unittest.TestCase):
         self.assertEqual(prev, '') # no previous owner
         self.assertEqual(cur, self.conn.name)
 
-        names = yield from self.obj.call(
-            member='ListNames',
-        )
+        names = yield from self.obj2.ListNames()
         # list should include me
         self.assertIn(self.conn.name, names)
         self.assertIn(myname, names)
 
-        ret = yield from self.obj.call(
-            member='ReleaseName',
-            sig='s',
-            body=myname,
-        )
+        ret = yield from self.obj2.ListNames()
+        ret = yield from self.obj2.ReleaseName(myname)
         self.assertEqual(ret, 1) # Released
 
         evt, sts = yield from LOST.recv()
@@ -94,9 +86,7 @@ class TestDBus(unittest.TestCase):
         self.assertEqual(prev, self.conn.name)
         self.assertEqual(cur, '') # no owner
 
-        names = yield from self.obj.call(
-            member='ListNames',
-        )
+        names = yield from self.obj2.ListNames()
         # list should include me
         self.assertIn(self.conn.name, names)
         self.assertNotIn(myname, names)

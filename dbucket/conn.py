@@ -134,11 +134,8 @@ class Match(object):
 
         yield from self._Q.put((None, self.DONE)) # waits if _Q is full
 
-        if hasattr(self._Q, 'join'):
-            # join() added in 3.4.4
-            #TODO: join here?  could easily deadlock
-            #yield from self._Q.join()
-            pass
+        #TODO: join here?  could easily deadlock
+        #yield from self._Q
 
     def _emit(self, event):
         if self._expr is None:
@@ -269,6 +266,7 @@ class Connection(object):
 
     @asyncio.coroutine
     def AddMatch(self, **kws):
+        # TODO: track map of well-known names and check against sender=
         if 'sender' in kws and kws['sender']!=DBUS and kws['sender'][0]!=':':
             # signals are always delivered with sender= set to the unique bus name of the orginator,
             # except for message from the dbus daemon.
