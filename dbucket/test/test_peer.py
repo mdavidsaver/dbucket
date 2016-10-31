@@ -17,11 +17,11 @@ class TestDBus(unittest.TestCase):
     servname = 'foo.bar'
     servpath = '/foo/bar'
 
+    @inloop
+    @asyncio.coroutine
     def setUp(self):
-        self.loop = asyncio.get_event_loop()
-        self.loop.set_debug(True)
-        self.client = self.loop.run_until_complete(connect_bus(get_session_infos(), loop=self.loop))
-        self.server = self.loop.run_until_complete(connect_bus(get_session_infos(), loop=self.loop))
+        self.client = yield from connect_bus(get_session_infos(), loop=self.loop)
+        self.server = yield from connect_bus(get_session_infos(), loop=self.loop)
         self.server.ignore_calls = False
         # Server's proxy for the dbus daemon
         self.serverdaemon = SimpleProxy(self.server,
@@ -35,11 +35,7 @@ class TestDBus(unittest.TestCase):
                                interface=self.servname,
                                path=self.servpath,
         )
-        self.setUp2()
 
-    @inloop
-    @asyncio.coroutine
-    def setUp2(self):
         ACQ = yield from self.serverdaemon.AddMatch(member='NameAcquired')
         yield from self.serverdaemon.call(member='RequestName',
                                           sig='su',
