@@ -552,3 +552,10 @@ class Connection(object):
         self._name = hello
 
         self.log = logging.getLogger(__name__+hello)
+
+        from .proxy import createProxy
+        self.daemon = yield from createProxy(self,
+                               destination=DBUS,
+                               path=DBUS_PATH,
+                               interface=DBUS,
+        )

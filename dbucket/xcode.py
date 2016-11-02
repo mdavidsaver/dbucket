@@ -35,6 +35,13 @@ def _next_type(sig):
         raise ValueError("Unbalenced ()")
     return sig[:pos], sig[pos:]
 
+def sigsplit(sig):
+    """Split dbus signature
+    """
+    while len(sig)>0:
+        S, sig = _next_type(sig)
+        yield S
+
 _dmap_plain = (
     (b'y', 'B'), # uint8
     (b'b', 'I'), # boolean (uint32)
