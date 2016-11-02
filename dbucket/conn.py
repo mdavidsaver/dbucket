@@ -318,22 +318,22 @@ class Connection(object):
         self.log.debug('call %s', (path, interface, member, destination, sig, body))
 
         opts = [
-            [1, Object(path)],
-            [3, member],
+            (1, Object(path)),
+            (3, member),
         ]
         if interface is not None:
-            opts.append([2, interface])
+            opts.append((2, interface))
         if destination is not None:
-            opts.append([6, destination])
+            opts.append((6, destination))
 
         if sig is not None:
             bodystr = encode(sig.encode('ascii'), body)
-            opts.append([8, Signature(sig)])
+            opts.append((8, Signature(sig)))
         else:
             bodystr = b''
 
         SN = self.get_sn()
-        req = [ord(_sys_L), METHOD_CALL, 0, 1,   len(bodystr), SN,   opts]
+        req = (ord(_sys_L), METHOD_CALL, 0, 1,   len(bodystr), SN,   opts)
         self.log.debug("call message %s %s", req, bodystr)
         header = encode(b'yyyyuua(yv)', req)
 
@@ -353,15 +353,15 @@ class Connection(object):
             (3, member),
         ]
         if destination is not None:
-            opts.append([6, destination])
+            opts.append((6, destination))
 
         if sig is not None:
             bodystr = encode(sig.encode('ascii'), body)
-            opts.append([8, Signature(sig)])
+            opts.append((8, Signature(sig)))
         else:
             bodystr = b''
 
-        req = [ord(_sys_L), SIGNAL, 0, 1,  len(bodystr), self.get_sn(),   opts]
+        req = (ord(_sys_L), SIGNAL, 0, 1,  len(bodystr), self.get_sn(),   opts)
         self.log.debug("signal message %s %s", req, bodystr)
         header = encode(b'yyyyuua(yv)', req)
         self._send(header, bodystr)
@@ -383,7 +383,7 @@ class Connection(object):
         if not self._running:
             return
 
-        msg = [ord(_sys_L), METHOD_RETURN, 0, 1,   len(bodystr), self.get_sn(),   opts]
+        msg = (ord(_sys_L), METHOD_RETURN, 0, 1,   len(bodystr), self.get_sn(),   opts)
         self.log.debug("return message %s %s", msg, bodystr)
         header = encode(b'yyyyuua(yv)', msg)
         self._send(header, bodystr)
@@ -400,7 +400,7 @@ class Connection(object):
         
         self.log.debug("error %s %s %s", event, name, msg)
         body = encode(b's', msg or name)
-        msg = [ord(_sys_L), ERROR, 0, 1,   len(body), self.get_sn(),   opts]
+        msg = (ord(_sys_L), ERROR, 0, 1,   len(body), self.get_sn(),   opts)
         self.log.debug("error message %s %s", msg, body)
         header = encode(b'yyyyuua(yv)', msg)
         self._send(header, body)

@@ -90,7 +90,7 @@ class Decoder(object):
         while len(sig)>0:
             selem, sig = _next_type(sig)
             if self.debug:
-                self._log.debug('Next elem %s', selem)
+                self._log.debug('Next elem %s at %d', selem, self.bpos)
             if selem[0]==ord(b'('):
                 assert selem[-1]==ord(b')')
                 self._dalign(8)
@@ -100,9 +100,16 @@ class Decoder(object):
                 # decode array size (in bytes)
                 self._dalign(4)
                 asize, = struct.unpack(self._L+'I', self.buffer[:4])
+                self.buffer = self.buffer[4:]
                 self.bpos += 4
 
-                self.buffer, afterbuffer = self.buffer[4:4+asize], self.buffer[4+asize:]
+                # now pad to array element boundary.
+                # we're already aligned to 4 bytes, so only need to do more when
+                # element alignment is 8 (int64, double, sub-array, struct, or dict
+                if chr(selem[1]) in 'xtda({':
+                    self._dalign(8)
+
+                self.buffer, afterbuffer = self.buffer[:asize], self.buffer[asize:]
                 assert len(self.buffer)==asize, (len(self.buffer), asize, self.buffer)
 
                 after = self.bpos+asize
@@ -131,12 +138,15 @@ class Decoder(object):
             else:
                 S = struct.Struct(self._L+_decode_plain[selem[0]])
                 self._dalign(S.size)
-                V, = S.unpack(self.buffer[:S.size])
+                try:
+                    V, = S.unpack(self.buffer[:S.size])
+                except struct.error as e:
+                    raise ValueError("Error %s decoding %s with %s at %s"%(e, self.buffer[:S.size], _decode_plain[selem[0]], self.bpos))
                 self.buffer = self.buffer[S.size:]
                 self.bpos += S.size
                 ret.append(V)
 
-        return ret
+        return tuple(ret)
 
 def decode(sig, buffer, lsb=_sys_lsb, bpos=0, debug=False):
     """
@@ -152,18 +162,10 @@ def decode(sig, buffer, lsb=_sys_lsb, bpos=0, debug=False):
         raise ValueError("Error %s while decoding %s %s.  %s"%(e, sig, repr(buffer), D))
     if bpos!=len(buffer) or len(remain)!=0:
         raise ValueError("Incomplete decode: %s"%repr(remain))
-    if len(R)==1:
+    if isinstance(R, tuple) and len(R)==1:
         return R[0]
     else:
         return R
-
-def _ealign(bufs, bpos, size):
-    M = bpos%size
-    if M:
-        N = size-M
-        bpos += N
-        bufs.append(b'\0'*N)
-    return bufs, bpos
 
 class Variant(object):
     """Value wrapper to force a specific DBus type when encoding as a Variant
@@ -202,75 +204,110 @@ def _infer_sig(val):
         return b's', val
     raise ValueError("Can't infer variant type for '%s'"%val)
 
-def _encode(sig, val, lsb=_sys_lsb, bpos=0):
-    L = '<' if lsb else '>'
-    if not isinstance(val, (tuple, list)):
+class Encoder(object):
+    debug = False
+    _log = logging.getLogger(__name__+'.encode')
+    def __init__(self, pos=0, lsb=_sys_lsb):
+        self.lsb, self.L = lsb, '<' if lsb else '>'
+        self.bpos = pos
+        self.bufs = []
+
+    def align(self, size):
+        M = self.bpos%size
+        if M:
+            N = size-M
+            self.bpos += N
+            self.bufs.append(b'\0'*N)
+
+    def encode(self, sig, val):
+        assert isinstance(val, tuple), val
+        if self.debug:
+            self._log.debug("Encode %s %s.  out pos %d", sig, val, self.bpos)
+
+        for mem in val:
+            selem, sig =_next_type(sig)
+            if self.debug:
+                self._log.debug("Encode member %s %s.  out pos %d", selem, mem, self.bpos)
+
+            if selem[0]==ord(b'('):
+                assert selem[-1]==ord(b')'), selem
+                self.align(8)
+
+                self.encode(selem[1:-1], mem)
+
+            elif selem[0]==ord(b'a'):
+                if self.debug:
+                    self._log.debug("Encode array %s", mem)
+                self.align(4)
+
+                sizeidx = len(self.bufs)
+                self.bufs.append(b'\0\0\0\0') # placeholder
+                self.bpos += 4
+
+                # now pad to array element boundary.
+                # we're already aligned to 4 bytes, so only need to do more when
+                # element alignment is 8 (int64, double, sub-array, struct, or dict
+                if chr(selem[1]) in 'xtda({':
+                    self.align(8)
+
+                # array size doesn't include padding before first element
+                ipos = self.bpos
+
+                for E in mem:
+                    if self.debug:
+                        self._log.debug("Encode array element %s %s.  out pos %d", selem[1:], E, self.bpos)
+                    self.encode(selem[1:], (E,))
+
+                # insert real size
+                self.bufs[sizeidx] = struct.pack(self.L+"I", self.bpos-ipos)
+
+            elif selem[0] in (ord(b'g'),):
+                N = len(mem)
+                assert N<=255
+                self.bpos += N+2
+                self.bufs.append(struct.pack("B", N)+mem+b'\0')
+
+            elif selem[0] in (ord(b's'),ord(b'o')):
+                N = len(mem)
+                self.bpos += N+5
+                if hasattr(mem, 'encode'):
+                    mem = mem.encode('utf-8')
+                assert isinstance(mem, bytes), mem
+                self.bufs.append(struct.pack(self.L+"I", N)+mem+b'\0')
+
+            elif selem[0]==ord(b'v'):
+                vsig, mem = _infer_sig(mem)
+                #print(" Encode Variant", vsig, mem, file=sys.stderr)
+                self.bufs.append(struct.pack("B", len(vsig))+vsig+b'\0')
+                self.bpos += len(vsig)+2
+
+                self.encode(vsig, (mem,))
+
+            else:
+                S = struct.Struct(self.L+_decode_plain[selem[0]])
+                self.align(S.size)
+
+                self.bpos += S.size
+                try:
+                    self.bufs.append(S.pack(mem))
+                except struct.error as e:
+                    raise ValueError("%s while encoding %s with %s"%(e, mem, _decode_plain[selem[0]]))
+
+        if self.debug:
+            self._log.debug("After %s %s -> %s", sig, val, self.bufs)
+        if len(sig)>0:
+            raise ValueError("Incomplete value, stops before '%s'"%sig)
+
+def encode(sig, val, lsb=_sys_lsb, debug=False):
+    """
+    """
+    if not isinstance(val, tuple):
         val = (val,)
-    mem = 0
-    bufs = []
-    for mem in val:
-        selem, sig =_next_type(sig)
-        #print("E", selem, sig, mem, file=sys.stderr)
-
-        if selem[0]==ord(b'('):
-            assert selem[-1]==ord(b')')
-            bufs, bpos = _ealign(bufs, bpos, 8)
-            sbufs, bpos = _encode(selem[1:-1], mem, lsb=lsb, bpos=bpos)
-            bufs.extend(sbufs)
-
-        elif selem[0]==ord(b'a'):
-            #print(" array", selem[0], mem, file=sys.stderr)
-            bufs, bpos = _ealign(bufs, bpos, 4)
-            bpos += 4 # account for size here, add after it is known
-
-            ipos = bpos
-            ebufs = []
-            for E in mem:
-                #print("  elem", selem[1:], E, file=sys.stderr)
-                mbufs, bpos = _encode(selem[1:], [E], lsb=lsb, bpos=bpos)
-                ebufs.extend(mbufs)
-
-            bufs.append(struct.pack(L+"I", bpos-ipos))
-            bufs.extend(ebufs)
-
-        elif selem[0] in (ord(b'g'),):
-            N = len(mem)
-            assert N<=255
-            bpos += N+2
-            bufs.append(struct.pack("B", N)+mem+b'\0')
-
-        elif selem[0] in (ord(b's'),ord(b'o')):
-            N = len(mem)
-            bpos += N+5
-            if hasattr(mem, 'encode'):
-                mem = mem.encode('utf-8')
-            bufs.append(struct.pack(L+"I", N)+mem+b'\0')
-
-        elif selem[0]==ord(b'v'):
-            vsig, mem = _infer_sig(mem)
-            #print(" Encode Variant", vsig, mem, file=sys.stderr)
-            bufs.append(struct.pack("B", len(vsig))+vsig+b'\0')
-            bpos += len(vsig)+2
-
-            vbufs, bpos = _encode(vsig, mem, lsb=lsb, bpos=bpos)
-            bufs.extend(vbufs)
-
-        else:
-            S = struct.Struct(L+_decode_plain[selem[0]])
-            bufs, bpos = _ealign(bufs, bpos, S.size)
-            bpos += S.size
-            bufs.append(S.pack(mem))
-
-    if len(sig)>0:
-        raise ValueError("Incomplete value, stops before '%s'"%sig)
-    return bufs, bpos
-
-def encode(sig, val, lsb=_sys_lsb):
-    """
-    """
+    E = Encoder(0, lsb)
+    E.debug = debug
     try:
-        bufs, bpos = _encode(sig, val, lsb=lsb, bpos=0)
+        E.encode(sig, val)
+        return b''.join(E.bufs)
     except Exception as e:
         _log.exception('oops')
-        raise ValueError("Error '%s' while encoding %s with (%s) %s"%(e, sig, type(val), repr(val)))
-    return b''.join(bufs)
+        raise ValueError("Error '%s' while encoding %s with (%s) %s.  near %d"%(e, sig, type(val), repr(val), E.bpos))
