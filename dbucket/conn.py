@@ -43,17 +43,32 @@ def _loop_sync(loop):
     loop.call_soon(partial(F.set_result, None))
     return F
 
+_dattrs = ('sender', 'interface', 'member', 'path', 'destination', 'type')
+
 class BusEvent(object):
-    def __init__(self, sn, headers, body):
-        self.serial = sn
-        self.body = body
-        self.path = headers[1]
-        self.interface = headers[2]
-        self.member = headers[3]
-        self.destination = headers[6]
-        self.sender = headers[7]
+    path=interface=destination=member=sender=sig=None
+    def __init__(self, mtype, sn, headers, body=None):
+        self.type, self.serial, self.body = mtype, sn, body
+        for code, val in headers:
+            if code==1:
+                self.path = val
+            elif code==2:
+                self.interface = val
+            elif code==3:
+                self.member = val
+            elif code==4:
+                self._error = val
+            elif code==5:
+                self._return_sn = val
+            elif code==6:
+                self.destination = val
+            elif code==7:
+                self.sender = val
+            elif code==8:
+                self.sig = val
+
     def __repr__(self):
-        S = ','.join(["%s='%s'"%(K,V) for K,V in self.__dict__.items()])
+        S = ','.join(["%s='%s'"%(K,getattr(self, K, None)) for K in _dattrs])
         return "%s(%s)"%(self.__class__.__name__, S)
 
 class Match(object):
@@ -84,7 +99,7 @@ class Match(object):
 
         # build match expression (eg. "interface='foo.bar',member='baz'")
         match = self._conds = []
-        for name in ('sender', 'interface', 'member', 'path', 'destination', 'type'):
+        for name in _dattrs:
             V = kws.pop(name, None)
             setattr(self, name, V)
             if V is not None:
@@ -406,66 +421,64 @@ class Connection(object):
         self._send(header, body)
 
     @asyncio.coroutine
+    def _recv_msg(self):
+        '''Receive one dbus message
+        '''
+        # full message spec is
+        #   yyyyuua(yv) ...body...
+        # Treat the first part as
+        #   yyyyuuu
+        # to get body and header array sizes to compute the size of the complete message
+        head = yield from self._R.readexactly(16)
+        #self.log.debug("Header %s", repr(head))
+
+        # validate byte order and version
+        if head[0] not in (ord(b'l'), ord(b'B')) or head[3]!=1:
+            raise RuntimeError('Invalid header %s'%head)
+
+        mtype, flags = head[1], head[2]
+        lsb = head[0]==ord(b'l')
+        L = '<' if lsb else '>'
+
+        blen, sn, hlen = struct.unpack(L+'III', head[4:])
+
+        # dbus spec puts arbitrary upper bounds on message and header sizes
+        if hlen+blen>2**27 or hlen>=2**26:
+            raise RuntimeError('Message too big %s %s'%(hlen, blen))
+
+        # header is padded so the body starts on an 8 byte boundary
+        bstart = ((hlen+7)&~7)
+        # no padding after body
+        fullsize = bstart + blen
+        #self.log.debug('Remainder hlen=%d bstart=%d blen=%d, fullsize=%d', hlen, bstart, blen, fullsize)
+
+        rest = yield from self._R.readexactly(fullsize)
+        if self.debug_net:
+            self.log.debug("recv message", rest)
+        headers, body = head+rest[:hlen], rest[bstart:]
+        #self.log.debug('Raw Headers=%s body=%s', headers, body)
+
+        # decode full header, but discard parts already handled
+        fullheaders = decode(b'yyyyuua(yv)', headers, lsb=lsb)
+        headers = fullheaders[-1]
+
+        evt = BusEvent(mtype, sn, headers)
+
+        # decode body if provided
+        if len(body):
+            evt.body = decode(evt.sig, body, lsb=lsb)
+
+        self.log.debug('recv message %s %s', fullheaders, evt.body)
+
+        return evt
+
+    @asyncio.coroutine
     def _recv(self):
         try:
             while True:
-                # full message spec is
-                #   yyyyuua(yv) ...body...
-                # Treat the first part as
-                #   yyyyuuu
-                # to get body and header array sizes to compute the size of the complete message
-                head = yield from self._R.readexactly(16)
-                #self.log.debug("Header %s", repr(head))
+                evt = yield from self._recv_msg()
 
-                # validate byte order and version
-                if head[0] not in (ord(b'l'), ord(b'B')) or head[3]!=1:
-                    raise RuntimeError('Invalid header %s'%head)
-
-                mtype, flags = head[1], head[2]
-                lsb = head[0]==ord(b'l')
-                L = '<' if lsb else '>'
-
-                blen, sn, hlen = struct.unpack(L+'III', head[4:])
-
-                # dbus spec puts arbitrary upper bounds on message and header sizes
-                if hlen+blen>2**27 or hlen>=2**26:
-                    raise RuntimeError('Message too big %s %s'%(hlen, blen))
-
-                # header is padded so the body starts on an 8 byte boundary
-                bstart = ((hlen+7)&~7)
-                # no padding after body
-                fullsize = bstart + blen
-                #self.log.debug('Remainder hlen=%d bstart=%d blen=%d, fullsize=%d', hlen, bstart, blen, fullsize)
-
-                rest = yield from self._R.readexactly(fullsize)
-                if self.debug_net:
-                    self.log.debug("recv message", rest)
-                headers, body = head+rest[:hlen], rest[bstart:]
-                #self.log.debug('Raw Headers=%s body=%s', headers, body)
-
-                # decode full header, but discard parts already handled
-                fullheaders = decode(b'yyyyuua(yv)', headers, lsb=lsb)
-                headers = fullheaders[-1]
-
-                # transform headers into array
-                H = [None]*10
-                for code, val in headers:
-                    if code<len(H):
-                        H[code] = val
-                headers = H
-                #self.log.debug('Headers %s', headers)
-                del H
-
-                # decode body if provided
-                if len(body):
-                    sig = headers[8] # body signature
-                    body = decode(sig, body, lsb=lsb)
-                else:
-                    body = None
-                self.log.debug('recv message %s %s', fullheaders, body)
-
-                if mtype==METHOD_CALL:
-                    evt = BusEvent(sn, headers, body)
+                if evt.type==METHOD_CALL:
                     if not self.ignore_calls:
                         for M in self._calls:
                             if M._emit(evt):
@@ -474,20 +487,19 @@ class Connection(object):
                     if evt is not None:
                         self._error(evt, UnknownMethod, "No one cared")
                         
-                elif mtype in (METHOD_RETURN, ERROR): 
-                    rsn = headers[5]
+                elif evt.type in (METHOD_RETURN, ERROR): 
+                    rsn = evt._return_sn
                     try:
                         F = self._inprog[rsn]
                     except KeyError:
                         self.log.warn('Received reply/error with unknown S/N %s', rsn)
                     else:
                         if not F.cancelled():
-                            if mtype==2:
-                                F.set_result(body)
+                            if evt.type==2:
+                                F.set_result(evt.body)
                             else:
-                                F.set_exception(RemoteError(body or headers[4], headers[4]))
-                elif mtype==SIGNAL:
-                    evt = BusEvent(sn, headers, body)
+                                F.set_exception(RemoteError(evt.body or evt._error, evt._error))
+                elif evt.type==SIGNAL:
                     used = False
                     for M in self._signals:
                         used |= M._emit(evt)
@@ -495,7 +507,7 @@ class Connection(object):
                         # this may happen naturally due to races with RemoveMatch
                        self.log.debug("Ignored signal %s", evt)
                 else:
-                    self.log.debug('Ignoring unknown dbus message type %s', mtype)
+                    self.log.debug('Ignoring unknown dbus message type %s', evt.type)
 
         except (asyncio.IncompleteReadError, asyncio.CancelledError):
             return # connection closed

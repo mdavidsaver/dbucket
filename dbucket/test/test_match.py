@@ -33,7 +33,7 @@ class TestSignalMatch(unittest.TestCase):
             "sender='SEND'",
         ]))
 
-        E = BusEvent(1, [None, '/PATH', 'IFACE', 'METH', None, None, 'DEST', 'SEND', None, None], None)
+        E = BusEvent(3, 1, [(1, '/PATH'), (2, 'IFACE'), (3, 'METH'), (6, 'DEST'), (7, 'SEND')], None)
 
         self.assertTrue(M._emit(E))
         self.assertIn(M, self.conn._signals)
@@ -61,7 +61,7 @@ class TestSignalMatch(unittest.TestCase):
             "sender='SEND'",
         ]))
 
-        E = BusEvent(1, [None, '/PATH', 'IFACE', 'OTHER', None, None, 'DEST', 'SEND', None, None], None)
+        E = BusEvent(3, 1, [(1, '/PATH'), (2, 'IFACE'), (3, 'OTHER'), (6, 'DEST'), (7, 'SEND')], None)
 
         self.assertFalse(M._emit(E))
         self.assertTrue(M._Q.empty())
