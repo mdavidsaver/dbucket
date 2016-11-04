@@ -122,8 +122,7 @@ def connect_bus(infos, *,
 
             conn = factory(W, R, info, loop=loop, **kws)
         except:
-            if R is not None and not R.transport.is_closing():
-                R.close()
+            W.close()
             _log.exception("Can't attach to %s", info)
             continue
 
