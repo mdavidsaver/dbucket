@@ -2,6 +2,7 @@
 import logging, sys
 _log = logging.getLogger(__name__)
 
+from collections import OrderedDict
 import struct
 
 __all__ = [
@@ -19,20 +20,26 @@ def _next_type(sig):
     """ Split type signature after first element (POD, array, or sub-struct)
     """
     assert isinstance(sig, bytes), 'Signature must be bytes'
-    pos, depth = 0, 0
+    pos, A, B = 0, 0, 0
     while pos<len(sig):
         C = sig[pos]
         if C==ord(b'('):
-            depth += 1
+            A += 1
         elif C==ord(b')'):
-            depth -= 1
+            A -= 1
+        elif C==ord(b'{'):
+            B += 1
+        elif C==ord(b'}'):
+            B -= 1
         pos += 1
-        if depth==0 and C!=ord(b'a'):
+        if A==0 and B==0 and C!=ord(b'a'):
             break
     if len(sig)==0 or pos==0:
         raise ValueError("Incomplete sig")
-    elif depth !=0:
+    elif A !=0:
         raise ValueError("Unbalenced ()")
+    elif B !=0:
+        raise ValueError("Unbalenced {}")
     return sig[:pos], sig[pos:]
 
 def sigsplit(sig):
@@ -85,6 +92,7 @@ class Decoder(object):
         if self.debug:
             self._log.debug('decode(%s) -> %s', sig, self.buffer)
         assert len(sig)>0, (sig, self)
+        assert sig[0]!=ord('{'), sig
         ret = []
 
         while len(sig)>0:
@@ -97,6 +105,14 @@ class Decoder(object):
                 ret.append(self.decode(selem[1:-1]))
 
             elif selem[0]==ord(b'a'):
+                esig = selem[1:]
+                adict = esig[0]==ord('{')
+                if adict:
+                    esig = b'('+esig[1:-1]+b')' # decode as a struct/tuple
+
+                if self.debug:
+                    self._log.debug('Decode array %s at %d', esig, self.bpos)
+
                 # decode array size (in bytes)
                 self._dalign(4)
                 asize, = struct.unpack(self._L+'I', self.buffer[:4])
@@ -106,7 +122,7 @@ class Decoder(object):
                 # now pad to array element boundary.
                 # we're already aligned to 4 bytes, so only need to do more when
                 # element alignment is 8 (int64, double, sub-array, struct, or dict
-                if chr(selem[1]) in 'xtda({':
+                if chr(esig[0]) in 'xtda({':
                     self._dalign(8)
 
                 self.buffer, afterbuffer = self.buffer[:asize], self.buffer[asize:]
@@ -115,8 +131,10 @@ class Decoder(object):
                 after = self.bpos+asize
                 ARR = []
                 while len(self.buffer)>0:
-                    ARR.append(self.decode(selem[1:])[0])
+                    ARR.append(self.decode(esig)[0])
                 assert self.bpos==after, (self.bpos, after) # array decode
+                if adict:
+                    ARR = OrderedDict(ARR)
                 ret.append(ARR)
                 self.buffer = afterbuffer
 
@@ -236,8 +254,15 @@ class Encoder(object):
                 self.encode(selem[1:-1], mem)
 
             elif selem[0]==ord(b'a'):
+                esig = selem[1:]
+                adict = esig[0]==ord('{')
+                if adict:
+                    esig = b'('+esig[1:-1]+b')' # decode as a struct/tuple
+                    mem = mem.items()
+
                 if self.debug:
-                    self._log.debug("Encode array %s", mem)
+                    self._log.debug("Encode array %s %s", esig, mem)
+
                 self.align(4)
 
                 sizeidx = len(self.bufs)
@@ -247,7 +272,7 @@ class Encoder(object):
                 # now pad to array element boundary.
                 # we're already aligned to 4 bytes, so only need to do more when
                 # element alignment is 8 (int64, double, sub-array, struct, or dict
-                if chr(selem[1]) in 'xtda({':
+                if chr(esig[0]) in 'xtda({':
                     self.align(8)
 
                 # array size doesn't include padding before first element
@@ -255,8 +280,8 @@ class Encoder(object):
 
                 for E in mem:
                     if self.debug:
-                        self._log.debug("Encode array element %s %s.  out pos %d", selem[1:], E, self.bpos)
-                    self.encode(selem[1:], (E,))
+                        self._log.debug("Encode array element %s %s.  out pos %d", esig, E, self.bpos)
+                    self.encode(esig, (E,))
 
                 # insert real size
                 self.bufs[sizeidx] = struct.pack(self.L+"I", self.bpos-ipos)

@@ -1,6 +1,6 @@
 import unittest
 
-import asyncio, functools
+import asyncio, functools, os, sys
 
 from ..conn import DBUS, DBUS_PATH, INTROSPECTABLE, RemoteError
 from ..auth import connect_bus, get_session_infos
@@ -126,3 +126,12 @@ class TestDBus(unittest.TestCase):
         import xml.etree.ElementTree as ET
         root = ET.fromstring(msg)
         self.assertEqual(root.tag, 'node')
+
+    @inloop
+    @asyncio.coroutine
+    def test_cred(self):
+        # also dests dict decode
+        info = yield from self.obj.call(member='GetConnectionCredentials', sig='s', body=self.conn.name)
+        if sys.platform in ('linux',):
+            self.assertEqual(info['UnixUserID'], os.getuid())
+            self.assertEqual(info['ProcessID'], os.getpid())

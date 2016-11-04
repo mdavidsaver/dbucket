@@ -1,4 +1,5 @@
 
+from collections import OrderedDict
 import unittest
 
 from ..xcode import _next_type, encode, decode, Object, Signature, Variant
@@ -47,6 +48,12 @@ class TestXCode(unittest.TestCase):
 
 class TestEncode(unittest.TestCase):
     data = [
+        # dict
+        (b'a{sv}',
+         OrderedDict([('ProcessID',Variant(b'u', 12514)), ('UnixUserID', Variant(b'u', 1000))]),
+         b'0\x00\x00\x00\x00\x00\x00\x00\t\x00\x00\x00ProcessID\x00\x01u\x00\x00\x00\x00\xe20\x00\x00\n\x00\x00\x00UnixUserID\x00\x01u\x00\x00\x00\xe8\x03\x00\x00',
+        ),
+
         # Hello method return
         (b'yyyyuua(yv)',
           (108, 2, 1, 1, 11, 1, [(6, ':1.336'), (5, Variant(b'u', 1)), (8, Signature('s')), (7, 'org.freedesktop.DBus')]),
@@ -66,6 +73,12 @@ class TestEncode(unittest.TestCase):
 
 class TestDecode(unittest.TestCase):
     data = [
+        # dict
+        (b'a{sv}',
+         {'ProcessID':12514, 'UnixUserID':1000},
+         b'0\x00\x00\x00\x00\x00\x00\x00\t\x00\x00\x00ProcessID\x00\x01u\x00\x00\x00\x00\xe20\x00\x00\n\x00\x00\x00UnixUserID\x00\x01u\x00\x00\x00\xe8\x03\x00\x00',
+        ),
+
         # Hello method return
         (b'yyyyuua(yv)',
           (108, 2, 1, 1, 11, 1, [(6, ':1.336'), (5, 1), (8, b's'), (7, 'org.freedesktop.DBus')]),
