@@ -44,7 +44,7 @@ def get_session_infos():
                     break
 
 def get_system_infos():
-    for loc in ('/var/run/dbus/system_bus_socket', '/var/run/dbus/system_bus_socket'):
+    for loc in ('/var/run/dbus/system_bus_socket',):
         yield {'unix:path':loc}
 
 _supported_methods = set(['EXTERNAL', 'ANONYMOUS'])
@@ -60,8 +60,11 @@ def connect_bus(infos, *,
                 loop=None,
                 **kws):
     """Accepts a sequence/generator of dictionaries describing possible bus endpoints.
-    Tries to connect to each until one succeeds.  Returns a Connection
-    or raises an exception
+    Tries to connect to each until one succeeds.
+    
+    A coroutine
+    
+    :returns: Connection
     """
     for info in infos:
         R, W = None, None

@@ -18,6 +18,7 @@ class Condition(object):
     """
     cattrs = set(['type', 'sender', 'interface', 'member', 'path', 'path_namespace', 'destination'])
     def __init__(self, **kws):
+        from .conn import DBUS
         self._remove = kws.pop('remove', True)
 
         if 'sender' in kws and kws['sender']!=DBUS and kws['sender'][0]!=':':
@@ -62,7 +63,8 @@ class SignalQueue(object):
 
     Condition = Condition
     def __init__(self, conn, *, qsize=4):
-        self.conn, self._cond, self._state = conn, [], self.NORMAL
+        self.conn, self._cond = conn, []
+        self._done, self._oflow = 0, self.NORMAL
         self._Q = asyncio.Queue(maxsize=qsize, loop=conn._loop)
         if not hasattr(self._Q, 'task_done'):
             # added in python 3.4.4
@@ -72,6 +74,8 @@ class SignalQueue(object):
 
     @asyncio.coroutine
     def add(self, **kws):
+        if self._done>0:
+            raise RuntimeError("close() called")
         """Add a new matching Condition
         
         :param str|None type: 'signal' or None
@@ -83,7 +87,7 @@ class SignalQueue(object):
         :param str|None path_namespace: 'signal' or None
         :returns: Condition
         """
-        if self._state==self.DONE:
+        if self._done>0:
             raise RuntimeError("Already close()d")
         C = self.Condition(**kws)
 
@@ -103,8 +107,12 @@ class SignalQueue(object):
         
         :param Condition C: Condition to remove
         :throws: RuntimeError if the Condition has not been added, or has already been removed
+    
+        A coroutine
         """
-        if C not in self._cond:
+        if self._done>0:
+            return
+        elif C not in self._cond:
             raise RuntimeError("Not my condition %s"%C)
 
         self._cond.remove(C)
@@ -120,12 +128,14 @@ class SignalQueue(object):
         If the queue is full, this coroutine will not complete
         until one entry has been recv() d.
         """
-        if self._state==self.DONE:
+        if self._done>0:
             return
-        self._done = True
+        self._done = 1
 
-        for C in self._cond:
-            yield from self.conn.RemoveMatch(C, C.expr)
+        # remove out matches
+        conds, self._cond = self._cond, []
+        yield from asyncio.gather(*[self.conn.RemoveMatch(C, C.expr) for C in conds],
+                                  loop=self.conn._loop, return_exceptions=True)
 
         yield from self._Q.put((None, self.DONE)) # waits if _Q is full
 
@@ -134,57 +144,65 @@ class SignalQueue(object):
         """coroutine yielding the next bus event
 
         :param bool throw_done: If False then returns (None, DONE). If True then ConnectionClosed is thrown.
-        :returns: (BusEvent, NORMAL|OFLOW|DONE)
+        :returns: (:py:class:`.BusEvent`, NORMAL|OFLOW|DONE)
         :throws: ConnectionClosed if throw_done=True and close() has been called.
 
         Returned BusEvent should not be modified
+    
+        A coroutine
         """
-        if self._state!=self.DONE:
+        if self._done<2:
             evt, sts = yield from self._Q.get()
             self._Q.task_done()
+            if sts==self.DONE:
+                self._done=2
         else:
             evt, sts = None, self.DONE
-        if throw_done and (self._done or sts==self.DONE):
+        if throw_done and sts==self.DONE:
             raise ConnectionClosed()
         return evt, sts
 
     def poll(self, *, throw_done=True):
-        "Non-blocking version of recv()"
-        if self._state!=self.DONE:
-            evt, sts = self._Q.task_done()
+        """Non-blocking version of recv()
+        
+        :throws: asyncio.QueueEmpty
+        """
+        if self._done<2:
+            evt, sts = self._Q.get_nowait()
             self._Q.task_done()
+            if sts==self.DONE:
+                self._done=2
         else:
             evt, sts = None, self.DONE
-        if throw_done and (self._done or sts==self.DONE):
+        if throw_done and sts==self.DONE:
             raise ConnectionClosed()
         return evt, sts
 
 
     def _emit(self, evt):
-        if self._done:
+        if self._done>0:
             return False
-        assert self._state is not self.DONE, self._state
 
         # check match conditions
-        for N in ('sender', 'interface', 'member', 'path', 'destination'):
-            M = getattr(self, N)
-            if M is not None and M!=getattr(event, N):
-                self.conn.log.debug("Mis-match %s %s", self, event)
-                return False
+        ok = False
+        for C in self._cond:
+            ok |= C.test(evt)
+        if not ok:
+            return False
 
-        self.conn.log.debug("Match %s %s", self, event)
+        self.conn.log.debug("Match %s %s", self, evt)
         try:
-            self._Q.put_nowait((event, self._state))
-            if self._state == self.OFLOW:
-                self.conn.log.debug("%s %s leaves overflow state", self.__class__.__name__, self._conds)
-            self._state = self.NORMAL
+            self._Q.put_nowait((evt, self._oflow))
+            if self._oflow == self.OFLOW:
+                self.conn.log.debug("%s %s leaves overflow state", self.__class__.__name__, self._cond)
+            self._oflow = self.NORMAL
             return True
         except asyncio.QueueFull:
-            if self._state != self.OFLOW:
-                self.conn.log.debug("%s %s enters overflow state", self.__class__.__name__, self._conds)
-            self._state = self.OFLOW
+            if self._oflow != self.OFLOW:
+                self.conn.log.debug("%s %s enters overflow state", self.__class__.__name__, self._cond)
+            self._oflow = self.OFLOW
             return False
 
     def __repr__(self):
-        return "%s(%s)"%(self.__class__.__name__, self._expr)
+        return "%s(%s)"%(self.__class__.__name__, self._cond)
 
