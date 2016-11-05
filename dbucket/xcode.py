@@ -167,7 +167,14 @@ class Decoder(object):
         return tuple(ret)
 
 def decode(sig, buffer, lsb=_sys_lsb, bpos=0, debug=False):
-    """
+    """Decode a python value from the given bytestring with the given signature bytestring
+
+    :param bytes sig: DBus type signature
+    :param bytes buffer: Byte buffer to decode
+    :param bool lsb: True if buffer was encoded as LSB, False for MSB.  Defaults to host byte order.
+    :param int bpos: Offset of buffer[0] is original bytestring.  Used in dbus alignment rules.
+    :param bool debug: Enabled verbose debugging of decoder processing
+    :returns: The decoded value.
     """
     D = Decoder(buffer, bpos, lsb)
     D.debug = debug
@@ -187,6 +194,9 @@ def decode(sig, buffer, lsb=_sys_lsb, bpos=0, debug=False):
 
 class Variant(object):
     """Value wrapper to force a specific DBus type when encoding as a Variant
+    
+    :param bytes code: The DBus type signature of val
+    :param val: A python value
     """
     def __init__(self, code, val):
         self.code, self.val = code, val
@@ -194,11 +204,13 @@ class Variant(object):
         return '%s(%s, %s)'%(self.__class__.__name__, self.code, self.val)
 
 class Signature(str, Variant):
+    "Wrap as a DBus Signature (code 'g')"
     def __init__(self, val):
         str.__init__(val)
         Variant.__init__(self, b'g', val.encode('utf-8'))
 
 class Object(str, Variant):
+    "Wrap as a DBus Object path (code 'o')"
     def __init__(self, val):
         str.__init__(val)
         Variant.__init__(self, b'o', val.encode('utf-8'))
@@ -324,7 +336,15 @@ class Encoder(object):
             raise ValueError("Incomplete value, stops before '%s'"%sig)
 
 def encode(sig, val, lsb=_sys_lsb, debug=False):
-    """
+    """Encode the given object using the given signature bytestring.
+
+    :param bytes sig: DBus type signature
+    :param val: The python value to encode
+    :param bool lsb: True if buffer was encoded as LSB, False for MSB.  Defaults to host byte order.
+    :param int bpos: Offset of buffer[0] is original bytestring.  Used in dbus alignment rules.
+    :param bool debug: Enabled verbose debugging of decoder processing
+    :returns: A bytestring
+    :rtype: bytes
     """
     if not isinstance(val, tuple):
         val = (val,)
