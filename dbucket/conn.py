@@ -2,21 +2,25 @@
 import logging
 #_log = logging.getLogger(__name__)
 
-import sys, struct
+import sys, struct, re
 from functools import partial
 import asyncio
 
 from .xcode import encode, decode, Object, Signature, Variant
+from .signal import SignalQueue, Condition
 
-# Name and Interface for DBUS daemon
+#: Bus name and Interface name for DBUS daemon
 DBUS='org.freedesktop.DBus'
-# Path for DBUS daemon
+#: Path for DBUS daemon
 DBUS_PATH='/org/freedesktop/DBus'
 
+#: Interface name for Introspect method
 INTROSPECTABLE='org.freedesktop.DBus.Introspectable'
 
 # Common error names
+# see dbus/dbus-protocol.h
 UnknownMethod = 'org.freedesktop.DBus.Error.UnknownMethod'
+LimitsExceed = 'org.freedesktop.DBus.Error.LimitsExceeded'
 
 METHOD_CALL = 1
 METHOD_RETURN = 2
@@ -27,10 +31,13 @@ _sys_lsb = sys.byteorder=='little'
 _sys_L   = b'l' if _sys_lsb else b'B'
 
 class ConnectionClosed(asyncio.CancelledError):
+    """Thrown when underlying Connection has become dis-connected
+    """
     def __init__(self):
         asyncio.CancelledError.__init__(self, 'Connection closed')
 
 class RemoteError(RuntimeError):
+    'Thrown when a DBus Error is received'
     def __init__(self, msg, name):
         RuntimeError.__init__(self, msg)
         self.name = name
@@ -43,10 +50,26 @@ def _loop_sync(loop):
     loop.call_soon(partial(F.set_result, None))
     return F
 
-_dattrs = ('sender', 'interface', 'member', 'path', 'destination', 'type')
-
 class BusEvent(object):
-    path=interface=destination=member=sender=sig=None
+    """Representation of a METHOD_CALL or SIGNAL message
+    """
+    #: Message type.  METHOD_CALL or SIGNAL
+    type=None
+    #: Bus Path string
+    path=None
+    #: Interface name.  May be None for METHOD_CALL
+    interface=None
+    #: Destination.  May be None
+    destination=None
+    #: Member name (aka method name)
+    member=None
+    #: Originator of the message.  Will be a unique name or DBUS
+    sender=None
+    #: Body signature.  Used only if body is not None
+    sig=None
+    #: Body value
+    body=None
+    _dattrs = ('sender', 'interface', 'member', 'path', 'destination', 'type', '_error', '_return_sn', 'sig')
     def __init__(self, mtype, sn, headers, body=None):
         self.type, self.serial, self.body = mtype, sn, body
         for code, val in headers:
@@ -67,146 +90,24 @@ class BusEvent(object):
             elif code==8:
                 self.sig = val
 
+    @classmethod
+    def build(klass, mtype, sn, **kws):
+        evt = klass(mtype, sn, [], body=kws.pop('body', None))
+        for N in klass._dattrs:
+            if N in kws:
+                setattr(evt, N, kws.pop(N))
+        assert len(kws)==0, kws
+        return evt
+
     def __repr__(self):
-        S = ','.join(["%s='%s'"%(K,getattr(self, K, None)) for K in _dattrs])
+        S = ','.join(["%s='%s'"%(K,getattr(self, K, None)) for K in self._dattrs])
         return "%s(%s)"%(self.__class__.__name__, S)
-
-class Match(object):
-    """Queue of received bus events (METHOD_CALL or SIGNAL)
-
-    Match(connection,
-          sender = None|'name',
-          interface = None|'name',
-          member = None|'name',
-          path = None|Object('name'),
-          destination = None|'name',
-    )
-    """
-    NORMAL = 0
-    OFLOW = 1
-    DONE = 2
-    sender=interface=member=path=destination=None
-    def __init__(self, conn, **kws):
-        self._state = self.NORMAL
-        # item Q'd (headers, body, status)
-        self._Q = asyncio.Queue(maxsize=kws.pop('qsize', 4), loop=conn._loop)
-        # delgate Q state info
-        self.empty, self.full, self.qsize = self._Q.empty, self._Q.full, self._Q.qsize
-        if not hasattr(self._Q, 'task_done'):
-            # added in python 3.4.4
-            self._Q.task_done = lambda:None
-        self.conn = conn
-
-        # build match expression (eg. "interface='foo.bar',member='baz'")
-        match = self._conds = []
-        for name in _dattrs:
-            V = kws.pop(name, None)
-            setattr(self, name, V)
-            if V is not None:
-                match.append((name, str(V)))
-        assert len(kws)==0, ('Unknown keyword arguments', kws)
-        #TODO: escape "'" and "\'
-        self._expr = ','.join(["%s='%s'"%(K,V) for K,V in match])
-
-    @asyncio.coroutine
-    def recv(self):
-        """coroutine returning the next bus event
-        
-        returns (BusEvent, state)
-        
-        Returned BusEvent should not be modified
-        """
-        if self._expr is None:
-            raise ConnectionClosed()
-        R = yield from self._Q.get()
-        self._Q.task_done()
-        return R
-
-    def poll(self):
-        if self._expr is None:
-            raise ConnectionClosed()
-        R = self._Q.get_nowait()
-        self._Q.task_done()
-        return R
-
-    @asyncio.coroutine
-    def _close(self):
-        pass
-
-    @asyncio.coroutine
-    def close(self):
-        """Stop receiving for this Match.
-        
-        A coroutine which completes after delivering queued events
-        """
-        if self._expr is None:
-            return
-
-        self._expr = None
-        self._state = self.DONE
-
-        yield from self._close()
-
-        yield from self._Q.put((None, self.DONE)) # waits if _Q is full
-
-        #TODO: join here?  could easily deadlock
-        #yield from self._Q
-
-    def _emit(self, event):
-        if self._expr is None:
-            return False
-        assert self._state is not self.DONE, self._state
-
-        # check match conditions
-        for N in ('sender', 'interface', 'member', 'path', 'destination'):
-            M = getattr(self, N)
-            if M is not None and M!=getattr(event, N):
-                self.conn.log.debug("Mis-match %s %s", self, event)
-                return False
-
-        self.conn.log.debug("Match %s %s", self, event)
-        try:
-            self._Q.put_nowait((event, self._state))
-            if self._state == self.OFLOW:
-                self.conn.log.debug("%s %s leaves overflow state", self.__class__.__name__, self._conds)
-            self._state = self.NORMAL
-            return True
-        except asyncio.QueueFull:
-            if self._state != self.OFLOW:
-                self.conn.log.debug("%s %s enters overflow state", self.__class__.__name__, self._conds)
-            self._state = self.OFLOW
-            return False
-
-    def __repr__(self):
-        return "%s(%s)"%(self.__class__.__name__, self._expr)
-
-class SignalMatch(Match):
-    @asyncio.coroutine
-    def _close(self):
-        self.conn._signals.remove(self)
-        if self.conn._running:
-            self.conn.log.debug('RemoveMatch: %s', self._expr)
-
-            try:
-                yield from self.call(interface='org.freedesktop.DBus',
-                                    member='RemoveMatch',
-                                    destination='org.freedesktop.DBus',
-                                    sig=b's',
-                                    body=self._expr)
-            except:
-                self.conn.log.exception("Error while RemoveMatch %s", self._conds)
-
-class MethodMatch(Match):
-    def done(self, evt, sig, body):
-        self.conn._method_return(evt, sig, body)
-    def error(self, evt, sig, body):
-        self.conn._error(evt, sig, body)
 
 class Connection(object):
     # ignore/error all calls from peers
     ignore_calls = True
 
-    # whether to log message byte strings (very verbose)
+    #: whether to log message byte strings (very verbose)
     debug_net = False
 
     def __init__(self, W, R, info, loop=None, name=None):
@@ -214,10 +115,13 @@ class Connection(object):
         self._W, self._R, self._info, self._loop = W, R, info, loop or asyncio.get_event_loop()
         self._running = True
 
-        self._inprog  = {} # in progress method calls
-        self._signals = [] # registered signal matches
-        self._calls   = [] # registered method call matches
-        #TODO: index storage of Match based on one of the headers?
+        self._inprog  = {} # in progress method calls we made.  {sn:Future()}
+        self._signals = [] # registered signal matches we might receive.  [SignalQueue()]
+        self._objs = {} # registered object.  {('interface','path'):Object}
+
+        # keep track of match expressions registered with the daemon
+        self._match_lock = asyncio.Lock(loop=loop)
+        self._matches = {} # {'match=expr':[Interested]}
 
         self._nextsn = 1 #TODO: randomize?
         self._RX = self._loop.create_task(self._recv())
@@ -225,13 +129,21 @@ class Connection(object):
         # my primary bus name, and the set of well known names I have acquired
         self._name, self._names = None, set()
 
-        # use Match instead of SignalMatch as AddMatch for daemon signals is implied
-        self._bus_signals = Match(self, qsize=20, sender=DBUS, path=DBUS_PATH, interface=DBUS)
+        # special-ness here since we don't have to call AddMatch to get daemon messages
+        self._bus_signals = self.new_queue(qsize=20)
+        C = Condition(remove=False, sender=DBUS, path=DBUS_PATH, interface=DBUS)
+        self._bus_signals._cond.append(C)
+
         self._signals.append(self._bus_signals)
+
         self._SIGS = self._loop.create_task(self._bus_sig())
 
     @asyncio.coroutine
     def close(self, sync=True):
+        """close out connection.
+        
+        A coroutine
+        """
         if not self._running:
             return
         self._W.close()
@@ -252,7 +164,7 @@ class Connection(object):
         F = list([M.close() for M in self._signals])
 
         # notify method listeners
-        F.extend([M.close() for M in self._calls])
+#        F.extend([M.close() for M in self._calls])
 
         # wait for notification to be delivered
         yield from asyncio.gather(*F, loop=self._loop, return_exceptions=True)
@@ -272,44 +184,56 @@ class Connection(object):
 
     @property
     def names(self):
-        'All my names'
+        'All my bus names'
         return self._names
 
     @property
     def running(self):
+        'Connected?'
         return self._running
 
     @asyncio.coroutine
-    def AddMatch(self, **kws):
-        # TODO: track map of well-known names and check against sender=
-        if 'sender' in kws and kws['sender']!=DBUS and kws['sender'][0]!=':':
-            # signals are always delivered with sender= set to the unique bus name of the orginator,
-            # except for message from the dbus daemon.
-            raise ValueError("AddMatch with sender='%s' isn't meaningful with well-known names"%kws['sender'])
+    def AddMatch(self, obj, expr):
+        '''Register match expression with dbus daemon and associate it with *obj*.
+        
+        A match expression will not be removed until every associated *obj*
+        is passed to RemoveMatch().
+        '''
         if not self._running:
             raise ConnectionClosed()
-        M = SignalMatch(self, type='signal', **kws)
-        self._signals.append(M)
-        self.log.debug('AddMatch: %s %s',kws, M._expr)
-        try:
-            yield from self.call(interface=DBUS,
-                                 destination=DBUS,
-                                 path=DBUS_PATH,
-                                 member='AddMatch',
-                                 sig='s',
-                                 body=M._expr)
-        except:
-            self._signals.remove(M)
-            raise
-        return M
+        with (yield from self._match_lock):            
+            try:
+                self._matches[expr].add(obj)
+            except KeyError:
+                yield from self.daemon.AddMatch(expr)
+                I = self._matches[expr] = set([obj])
 
-    def AddCall(self, **kws):
+    @asyncio.coroutine
+    def RemoveMatch(self, obj, expr):
+        '''Remove match expression association
+        '''
         if not self._running:
-            raise ConnectionClosed()
-        M = MethodMatch(self, type='method_call', **kws)
-        self._calls.append(M)
-        self.log.debug('AddCall: %s', M._expr)
-        return M
+            return
+        with (yield from self._match_lock):            
+            try:
+                I = self._matches[expr]
+                I.remove(obj)
+            except (KeyError, ValueError):
+                raise RuntimeError("Object not registered with match %s %s"%(expr, obj))
+            else:
+                if len(I)==0:
+                    del self._matches[expr]
+                    yield from self.daemon.RemoveMatch(expr)
+
+    def new_queue(self, **kws):
+        '''Create are return a new :py:class:`.SignalQueue`.
+        '''
+        Q = SignalQueue(self, **kws)
+        self._signals.append(Q)
+        return Q
+
+    def _export_object(self, obj):
+        pass
 
     def get_sn(self):
         SN = self._nextsn
@@ -325,6 +249,11 @@ class Connection(object):
                 self.log.debug("send message serialized %s", S)
  
     def call(self, *, path=None, interface=None, member=None, destination=None, sig=None, body=None):
+        '''Call remote method
+        
+        :returns: A Future which completes with the result value
+        :throws: RemoteError if call results in an Error response.
+        '''
         assert path is not None, "Method calls require path="
         assert member is not None, "Method calls require member="
         assert sig is None or isinstance(sig, str), "Signature must be str (or None)"
@@ -358,6 +287,8 @@ class Connection(object):
         return ret
 
     def signal(self, *, path=None, interface=None, member=None, destination=None, sig=None, body=None):
+        '''Emit a signal
+        '''
         if not self._running:
             return
         self.log.debug('signal %s', (path, interface, member, destination, sig, body))
@@ -520,14 +451,14 @@ class Connection(object):
     def _bus_sig(self):
         """Handle signals sender='org.freedesktop.DBus' (aka signals from the bus daemon)
         """
-        last_state = Match.NORMAL
+        last_state = SignalQueue.NORMAL
         while True:
             try:
-                event, state = yield from self._bus_signals.recv()
-                if state==Match.DONE:
+                event, state = yield from self._bus_signals.recv(throw_done=False)
+                if state==SignalQueue.DONE:
                     return
-                elif state==Match.OFLOW:
-                    if last_state==Match.NORMAL:
+                elif state==SignalQueue.OFLOW:
+                    if last_state==SignalQueue.NORMAL:
                         self.log.warn('Missed some dbus daemon signals')
                 last_state = state
 

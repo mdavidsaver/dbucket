@@ -5,7 +5,8 @@ _log = logging.getLogger(__name__)
 
 import asyncio, functools
 
-from ..conn import DBUS, DBUS_PATH, RemoteError, Match
+from ..conn import DBUS, DBUS_PATH, RemoteError
+from ..signal import SignalQueue
 from ..auth import connect_bus, get_session_infos
 from ..proxy import SimpleProxy
 from .util import inloop
@@ -69,9 +70,9 @@ class TestDBus(unittest.TestCase):
         def answer():
             _log.info("answer starts")
             while True:
-                evt, sts = yield from CALL.recv()
+                evt, sts = yield from CALL.recv(throw_done=False)
                 _log.info("answer recv <- %s %s", evt, sts)
-                if sts==Match.DONE:
+                if sts==SignalQueue.DONE:
                     break
                 try:
                     CALL.done(evt, 's', evt.body+' world')
@@ -92,7 +93,8 @@ class TestDBus(unittest.TestCase):
     @inloop
     @asyncio.coroutine
     def test_signal(self):
-        SIG = yield from self.client.AddMatch(
+        SIG = self.client.new_queue()
+        yield from SIG.add(
             interface=self.servname,
             path=self.servpath,
             member='Testing',

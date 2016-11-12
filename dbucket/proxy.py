@@ -6,12 +6,18 @@ from collections import defaultdict
 import asyncio, functools, inspect
 import xml.etree.ElementTree as ET
 
+from .conn import Variant, RemoteError
 from .xcode import sigsplit
 
 INTROSPECTABLE='org.freedesktop.DBus.Introspectable'
 
 IDOCTYPE = '''<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
 "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">\n'''
+
+PROPERTIES = 'org.freedesktop.DBus.Properties'
+
+UNKNOWNMETHOD = "org.freedesktop.DBus.Error.UnknownMethod"
+UNKNOWNOBJECT = "org.freedesktop.DBus.Error.UnknownObject"
 
 class SimpleProxy(object):
     """Simple proxy object around a connection for a single (destination, path, interface)
@@ -23,14 +29,17 @@ class SimpleProxy(object):
         self.conn = conn
         self._name, self._path, self._interface = name, path, interface
 
+    @asyncio.coroutine
     def AddMatch(self, **kws):
+        Q = self.conn.new_queue()
         args = {
             'sender':self._name,
             'path':self._path,
             'interface':self._interface,
         }
         args.update(kws)
-        return self.conn.AddMatch(**args)
+        yield from Q.add(**args)
+        return Q
 
     def call(self, **kws):
         args = {
@@ -89,11 +98,39 @@ class SignalManager(object):
         self.proxy, self.signame = proxy, signame
     @asyncio.coroutine
     def connect(self):
-        return (yield from self.proxy._dbus_connection.AddMatch(
+        Q = self.proxy._dbus_connection.new_queue()
+        yield from Q.add(
             #sender=self.proxy._dbus_destination, #TODO track well-known names and check this?
             path=self.proxy._dbus_path,
             interface=self.proxy._dbus_interface,
             member=self.signame,
+        )
+        return Q
+
+class PropertyAccessor(object):
+    def __init__(self, sig, iface, name):
+        self._sig, self._iface, self._name = sig, iface, name
+
+    @asyncio.coroutine
+    def __get__(self, inst, klass):
+        return (yield from inst._dbus_connection.call(
+            destination = inst._dbus_destination,
+            path = inst._dbus_path,
+            iface = PROPERTIES,
+            method = 'Get',
+            sig = 'ss',
+            body = (self._iface or inst._dbus_interface, self._name),
+        ))
+
+    @asyncio.coroutine
+    def __set__(self, inst, value):
+        return (yield from inst._dbus_connection.call(
+            destination = inst._dbus_destination,
+            path = inst._dbus_path,
+            iface = PROPERTIES,
+            method = 'Get',
+            sig = 'ssv',
+            body = (self._iface or inst._dbus_interface, self._name, Variant(self._sig, value)),
         ))
 
 def buildProxy(xml, *, interface=None):
@@ -144,6 +181,11 @@ def buildProxy(xml, *, interface=None):
         )
         sigs.append((name, doc))
     klass['_dbus_signals'] = sigs
+
+    for pnode in node.findall('property'):
+        '<property name="Bar" type="y" access="readwrite"/>'
+        name, sig = pnode.attrib['name'], pnode.attrib['type']
+        klass[name] = PropertyAccessor(sig, interface, name)
 
     return type(interface.replace('.','_'), (ProxyBase,), klass)
 
@@ -213,8 +255,10 @@ def Method(*, name=None, interface=None):
             ret = [ret]
 
         args = []
-        for A in SIG.parameters.values():
-            if A.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+        for i, A in enumerate(SIG.parameters.values()):
+            if i==0 and A.name=='self':
+                continue
+            elif A.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
                 if A.annotation is inspect.Parameter.empty:
                     raise TypeError("Method() requires annotation of '%s'"%A.name)
                 elif isinstance(A.annotation, str) and len(list(sigsplit(A.annotation.encode('ascii'))))!=1:
@@ -225,6 +269,7 @@ def Method(*, name=None, interface=None):
 
         ret = meth._dbus_return = _infer_sig(*ret)
         sig = meth._dbus_sig = _infer_sig(*args)
+        meth._dbus_nsig = len(args)
 
         meth._dbus_method = name or meth.__name__
         meth._dbus_interface = interface
@@ -310,52 +355,128 @@ def Signal(*args, name=None, interface=None):
         return sendsig
     return decorate
 
-def Introspect(self):
-    """s = Introspect()
-    """
-    return self._dbus_xml
+class ExportNode(dict):
+    def __init__(self, name, fullpath, *, parent=None):
+        self.name, self.fullpath, self.obj, self.parent = name, fullpath, None, parent
+        self.children = {}
+        if parent is not None:
+            parent.children[name] = self
 
-Introspect._dbus_method = 'Introspect'
-Introspect._dbus_interface = INTROSPECTABLE
-Introspect._dbus_sig = ''
-Introspect._dbus_return = 's'
+        self.xml = None
+        self.node_xml = '<node></node>'
 
-@asyncio.coroutine
-def exportObject(conn, obj, *, path='/', interface=None):
-    if hasattr(obj, '_dbus_connection'):
-        raise RuntimeError("Already exported") # also prevent client proxy from being exported
-    if hasattr(obj, 'detach'):
-        raise RuntimeError("detach would be replaced be generated detech() method")
+    @Method()
+    def Introspect(self) -> str:
+        if self.xml is None:
+            if len(self)==0:
+                self.xml = self.node_xml
+            else:
+                node = ET.fromstring(self.node_xml)
+                for C in self.children:
+                    ET.SubElement(node, 'node', name=C.name)
+                self.xml = ET.tostring(node)
 
-    root = ET.Element('node')
-    intero = ET.SubElement('interface', name=INTROSPECTABLE)
-    intero = ET.SubElement('method', name='Introspect')
-    ET.SubElement(intero, 'arg', dir='out', type='s')
+        return self.xml
 
-    methods = {
-        (INTROSPECTABLE, 'Introspect'):functools.partial(Introspect, obj),
-    }
-    for K,V in inspect.getmembers(obj):
-        if interface is None and hasattr(V, '_dbus_interface') and V._dbus_interface is None:
-            raise ValueError("Default interface name required as '%s' specifies no interface"%K)
+    def attach(self, obj, *, interface=None):
+        self.xml = None
+        if hasattr(obj, 'detach'):
+            raise RuntimeError("detach would be replaced be generated detech() method")
+        elif self.obj is not None:
+            raise RuntimeError("Path %s is already attached by %s"%(eslf.fullpath, self.obj))
 
-        if not hasattr(V, '_dbus_xml'):
-            continue
+        root = ET.Element('node')
+        intero = ET.SubElement(root, 'interface', name=INTROSPECTABLE)
+        intero = ET.SubElement(intero, 'method', name='Introspect')
+        ET.SubElement(intero, 'arg', dir='out', type='s')
 
-        inode = root.find("interface[@name='%s']"%iface) or ET.SubElement(root, 'interface', name=iface)
+        methods = {
+            (INTROSPECTABLE, 'Introspect'):self.Introspect,
+        }
+        for K,V in inspect.getmembers(obj):
+            if interface is None and hasattr(V, '_dbus_interface') and V._dbus_interface is None:
+                raise ValueError("Default interface name required as '%s' specifies no interface"%K)
 
-        inode.append(ET.fromstring(V._dbus_xml))
+            if not hasattr(V, '_dbus_xml'):
+                continue
+            iface = V._dbus_interface or interface
 
-        if not hasattr(V, '_dbus_method'):
-            continue
+            inode = root.find("interface[@name='%s']"%iface) or ET.SubElement(root, 'interface', name=iface)
 
-        mname = V._dbus_method
-        iface = V._dbus_interface or interface
-        assert iface is not None, (K,V)
+            inode.append(ET.fromstring(V._dbus_xml))
 
-        methods[(iface, mname)] = V
+            if not hasattr(V, '_dbus_method'):
+                continue
 
+            mname = V._dbus_method
+            assert iface is not None, (K,V)
 
-    obj._dbus_xml = IDOCTYPE+ET.tostring(root)
-    obj._dbus_connection = conn
+            methods[(iface, mname)] = V
 
+        self.node_xml = ET.tostring(root)
+
+        self.methods = methods
+        self.obj = obj
+
+    def detech(self):
+        self.obj = self.methods = None
+        #if len(self.children)==0 and self.parent is not None:
+        #    del self.parent.children[self]
+
+        self.xml = None
+        self.node_xml = '<node></node>'
+
+class MethodDispatch(object):
+    Node = ExportNode
+
+    def __init__(self, conn):
+        self.conn = conn
+
+        self._dispatch = {} # {('/full/path':obj}
+
+        self.root = self.Node('/', '/')
+
+    def _get_node(self, path):
+        assert path[0]=='/', path
+        parts = path[1:].split('/')
+        node = self.root
+        for P in parts:
+            try:
+                node = node.children[P]
+            except KeyError:
+                node = node.children[P] = self.Node(P, path, parent=node)
+        return node
+
+    def attach(self, obj, *, path='/', interface=None):
+        assert path[0]=='/', path
+        node = self._get_node(path)
+        if node.obj is not None:
+            raise RuntimeError("Path %s is already attached by %s"%(path, node.obj))
+
+        node.attach(obj, interface=interface)
+        self._dispatch[path] = node
+
+    def detach(self, path):
+        node = self._get_node(path)
+        if node is not None:
+            node.detach()
+
+    def handle(self, evt):
+        node = self._dispatch.get(evt.path)
+        if node is None:
+            raise RemoteError('No path', UNKNOWNOBJECT)
+
+        if evt.interface==INTROSPECTABLE:
+            if evt.member!='Introspect':
+                raise RemoteError('No Method', UNKNOWNMETHOD)
+
+            return node.xml, 's'
+
+        M = node.methods[(evt.interface, evt.member)]
+
+        if M._dbus_nsig==0:
+            return M(), M._dbus_return
+        elif M._dbus_nsig==1:
+            return M(evt.body), M._dbus_return
+        else:
+            return M(*evt.body), M._dbus_return

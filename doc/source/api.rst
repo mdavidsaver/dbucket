@@ -45,3 +45,5 @@ Bus Connection
 .. autoclass:: BusEvent
    :members:
 
+.. autoclass:: Connection
+   :members: close, name, names, running, new_queue, call, signal

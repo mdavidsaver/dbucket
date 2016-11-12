@@ -2,8 +2,8 @@
 import unittest, asyncio
 import xml.etree.ElementTree as ET
 
-from ..conn import DBUS, DBUS_PATH
-from ..proxy import buildProxy, ProxyBase, Method, Signal
+from ..conn import DBUS, DBUS_PATH, METHOD_CALL, BusEvent
+from ..proxy import buildProxy, ProxyBase, Method, Signal, MethodDispatch
 from .util import inloop, FakeConnection
 
 class TestBuilder(unittest.TestCase):
@@ -71,15 +71,15 @@ class TestExport(unittest.TestCase):
     def test_Method(self):
         class Test(object):
             @Method()
-            def Empty():
+            def Empty(self):
                 pass
 
             @Method(name="Alt")
-            def Input(a:int, b:(int, str), c:[str]) -> [(int, str)]:
+            def Input(self, a:int, b:(int, str), c:[str]) -> [(int, str)]:
                 pass
 
             @Method(interface="org.other")
-            def Manual(a:'i', b:'(is)', c:'as') -> 'a(is)':
+            def Manual(self, a:'i', b:'(is)', c:'as') -> 'a(is)':
                 pass
 
         self.assertEqual(Test.Empty._dbus_method, 'Empty')
@@ -122,3 +122,58 @@ class TestExport(unittest.TestCase):
         self.assertEqual(Test.Sig1._dbus_sig, '')
         self.assertEqual(Test.Sig2._dbus_sig, 'i')
         self.assertEqual(Test.Sig3._dbus_sig, 'ii')
+
+class TestDispatch(unittest.TestCase):
+    class Test(object):
+        @Method(interface='foo.Op')
+        def Zero(self) -> int:
+            return 0
+        @Method(interface='foo.Op')
+        def Inv(self, a:int) -> int:
+            return -a
+        @Method(interface='foo.Op')
+        def Add(self, a:int, b:int) -> int:
+            return a+b
+
+    def setUp(self):
+        self.conn = FakeConnection()
+        self.disp = MethodDispatch(self.conn)
+        self.inst = self.Test()
+        self.disp.attach(self.inst)
+
+    def test_Zero(self):
+
+        val, sig = self.disp.handle(BusEvent.build(METHOD_CALL, 1,
+            path='/',
+            interface='foo.Op',
+            member='Zero',
+        ))
+
+        self.assertEqual(sig, 'i')
+        self.assertEqual(val, 0)
+
+    def test_Inv(self):
+
+        val, sig = self.disp.handle(BusEvent.build(METHOD_CALL, 1,
+            path='/',
+            interface='foo.Op',
+            member='Inv',
+            sig='i',
+            body=42,
+        ))
+
+        self.assertEqual(sig, 'i')
+        self.assertEqual(val, -42)
+
+    def test_Add(self):
+
+        val, sig = self.disp.handle(BusEvent.build(METHOD_CALL, 1,
+            path='/',
+            interface='foo.Op',
+            member='Add',
+            sig='ii',
+            body=(1,3),
+        ))
+
+        self.assertEqual(sig, 'i')
+        self.assertEqual(val, 4)

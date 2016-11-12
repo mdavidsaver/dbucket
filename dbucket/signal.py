@@ -159,6 +159,7 @@ class SignalQueue(object):
         else:
             evt, sts = None, self.DONE
         if throw_done and sts==self.DONE:
+            from .conn import ConnectionClosed
             raise ConnectionClosed()
         return evt, sts
 
