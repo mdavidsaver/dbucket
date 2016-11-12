@@ -35,3 +35,7 @@ class FakeConnection(object):
             return self._results[(interface, path, destination, member)].pop(0)
         except:
             raise RuntimeError('Unexpected call: %s'%((interface, path, destination, member),))
+
+    def signal(self, **kws):
+        from ..conn import BusEvent, SIGNAL
+        self._signals.append(BusEvent.build(SIGNAL, 1, **kws))

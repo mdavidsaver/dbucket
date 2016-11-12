@@ -8,54 +8,69 @@ import asyncio, functools
 from ..conn import DBUS, DBUS_PATH, RemoteError
 from ..signal import SignalQueue
 from ..auth import connect_bus, get_session_infos
-from ..proxy import SimpleProxy
+from ..proxy import Interface, Method, Signal
 from .util import inloop
 
-class TestDBus(unittest.TestCase):
+class TestPeer(unittest.TestCase):
     'Two peers talking to eachother'
     timeout = 1.0
 
     servname = 'foo.bar'
     servpath = '/foo/bar'
 
+    @Interface(servname)
+    class Foo(object):
+        @Method()
+        def Echo(self, s:str) -> str:
+            return s+' world'
+        @asyncio.coroutine
+        @Method()
+        def DelayEcho(self, s:str) -> str:
+            return s+' is a test'
+        @Signal()
+        def Testing(self, s:str):
+            pass
+
     @inloop
     @asyncio.coroutine
     def setUp(self):
         self.client = yield from connect_bus(get_session_infos(), loop=self.loop)
         self.server = yield from connect_bus(get_session_infos(), loop=self.loop)
-        self.server.ignore_calls = False
-        # Server's proxy for the dbus daemon
-        self.serverdaemon = SimpleProxy(self.server,
-                               name=DBUS,
-                               interface=DBUS,
-                               path=DBUS_PATH,
-        )
-        # Client's proxy to the server
-        self.serverobj = SimpleProxy(self.client,
-                               name=self.servname,
-                               interface=self.servname,
-                               path=self.servpath,
-        )
+        try:
+            self.serverobj = self.Foo()
+            self.server.attach(self.serverobj, path=self.servpath)
 
-        ACQ = yield from self.serverdaemon.AddMatch(member='NameAcquired')
-        yield from self.serverdaemon.call(member='RequestName',
-                                          sig='su',
-                                          body=(self.servname, 4), # don't queue
-        )
-        evt, sts = yield from ACQ.recv()
-        self.assertEqual(evt.body, self.servname)
+            ret = yield from self.server.daemon.RequestName(self.servname, 4) # don't queue
+            self.assertEqual(ret, 1) # now primary owner
+
+            self.obj = yield from self.client.proxy(
+                destination=self.servname,
+                interface=self.servname,
+                path=self.servpath,
+            )
+        except:
+            yield from asyncio.gather(self.client.close(),
+                                    self.server.close())
+            raise
 
     @inloop
     @asyncio.coroutine
     def tearDown(self):
+        self.server.detach(self.servpath)
         yield from asyncio.gather(self.client.close(),
-                                  self.server.close())
+                                  self.server.close(),
+                                  loop=self.loop)
 
     @inloop
     @asyncio.coroutine
     def test_badcall(self):
         try:
-            yield from self.serverobj.call(member='baz')
+            yield from self.client.call(
+                destination=self.servname,
+                interface=self.servname,
+                path=self.servpath,
+                member='baz'
+            )
             self.fail("Unexpected success")
         except RemoteError as e:
             self.assertEqual(e.name, 'org.freedesktop.DBus.Error.UnknownMethod')
@@ -63,50 +78,16 @@ class TestDBus(unittest.TestCase):
     @inloop
     @asyncio.coroutine
     def test_callecho(self):
-        CALL = self.server.AddCall(
-            member='Echo',
-        )
-        @asyncio.coroutine
-        def answer():
-            _log.info("answer starts")
-            while True:
-                evt, sts = yield from CALL.recv(throw_done=False)
-                _log.info("answer recv <- %s %s", evt, sts)
-                if sts==SignalQueue.DONE:
-                    break
-                try:
-                    CALL.done(evt, 's', evt.body+' world')
-                except:
-                    _log.exception('answer oops')
-                    raise
-            _log.info("answer stops")
-
-        T = self.loop.create_task(answer())
-        try:
-            msg = yield from self.serverobj.call(member='Echo', sig='s', body='hello')
-            self.assertEqual(msg, 'hello world')
-        finally:
-            _log.info("result received")
-            yield from CALL.close()
-            yield from T
+        msg = yield from self.obj.Echo('hello')
+        self.assertEqual(msg, 'hello world')
 
     @inloop
     @asyncio.coroutine
     def test_signal(self):
         SIG = self.client.new_queue()
-        yield from SIG.add(
-            interface=self.servname,
-            path=self.servpath,
-            member='Testing',
-        )
+        yield from self.obj.Testing.connect(SIG)
 
-        self.server.signal(
-            interface=self.servname,
-            path=self.servpath,
-            member='Testing',
-            sig='s',
-            body='one',
-        )
+        self.serverobj.Testing('one')
 
         evt, sts = yield from SIG.recv()
         self.assertEqual(evt.body, 'one')

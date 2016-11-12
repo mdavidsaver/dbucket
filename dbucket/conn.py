@@ -6,6 +6,8 @@ import sys, struct, re
 from functools import partial
 import asyncio
 
+ensure_future = getattr(asyncio, 'ensure_future', asyncio.async)
+
 from .xcode import encode, decode, Object, Signature, Variant
 from .signal import SignalQueue, Condition
 
@@ -104,9 +106,6 @@ class BusEvent(object):
         return "%s(%s)"%(self.__class__.__name__, S)
 
 class Connection(object):
-    # ignore/error all calls from peers
-    ignore_calls = True
-
     #: whether to log message byte strings (very verbose)
     debug_net = False
 
@@ -117,7 +116,12 @@ class Connection(object):
 
         self._inprog  = {} # in progress method calls we made.  {sn:Future()}
         self._signals = [] # registered signal matches we might receive.  [SignalQueue()]
-        self._objs = {} # registered object.  {('interface','path'):Object}
+        
+        from .proxy import MethodDispatch
+        self._methods = MethodDispatch(self)
+        # delegate some of our methods to dispatcher
+        self.attach = self._methods.attach
+        self.detach = self._methods.detach
 
         # keep track of match expressions registered with the daemon
         self._match_lock = asyncio.Lock(loop=loop)
@@ -146,6 +150,7 @@ class Connection(object):
         """
         if not self._running:
             return
+        self.log.info("Closing")
         self._W.close()
         self._running = False
         # join the receiver Task
@@ -176,6 +181,7 @@ class Connection(object):
         # intended to help with a clean shutdown when used
         # like 'loop.run_until_complete(conn.close())'
         yield from _loop_sync(self._loop)
+        self.log.info("Closed")
 
     @property
     def name(self):
@@ -232,8 +238,11 @@ class Connection(object):
         self._signals.append(Q)
         return Q
 
-    def _export_object(self, obj):
-        pass
+    def proxy(self, **kws):
+        '''A coroutine yielding a new client proxy object
+        '''
+        from .proxy import createProxy
+        return createProxy(self, **kws)
 
     def get_sn(self):
         SN = self._nextsn
@@ -345,7 +354,7 @@ class Connection(object):
             return
         
         self.log.debug("error %s %s %s", event, name, msg)
-        body = encode(b's', msg or name)
+        body = encode(b's', str(msg or name))
         msg = (ord(_sys_L), ERROR, 0, 1,   len(body), self.get_sn(),   opts)
         self.log.debug("error message %s %s", msg, body)
         header = encode(b'yyyyuua(yv)', msg)
@@ -403,6 +412,18 @@ class Connection(object):
 
         return evt
 
+    def _evt_return(self, F, evt=None):
+        try:
+            val, sig = F.result()
+        except asyncio.CancelledError:
+            pass
+        except RemoteError as e:
+            self._error(evt, e.name, str(e))
+        except Exception as e:
+            self._error(evt, e.__class__.__name__, str(e))
+        else:
+            self._method_return(evt, sig, val)
+
     @asyncio.coroutine
     def _recv(self):
         try:
@@ -410,13 +431,19 @@ class Connection(object):
                 evt = yield from self._recv_msg()
 
                 if evt.type==METHOD_CALL:
-                    if not self.ignore_calls:
-                        for M in self._calls:
-                            if M._emit(evt):
-                                evt = None # consumed
-                                break
-                    if evt is not None:
-                        self._error(evt, UnknownMethod, "No one cared")
+                    try:
+                        ret = self._methods.handle(evt)
+                        if asyncio.iscoroutine(ret):
+                            ret = ensure_future(ret)
+                        if isinstance(ret, asyncio.Future):
+                            ret.add_done_callback(functools.partial(self._evt_return, evt=evt))
+                        else:
+                            val, sig = ret
+                            self._method_return(evt, sig, val)
+                    except RemoteError as e:
+                        self._error(evt, e.name, str(e))
+                    except Exception as e:
+                        self._error(evt, e.__class__.__name__, str(e))
                         
                 elif evt.type in (METHOD_RETURN, ERROR): 
                     rsn = evt._return_sn
@@ -440,7 +467,11 @@ class Connection(object):
                 else:
                     self.log.debug('Ignoring unknown dbus message type %s', evt.type)
 
-        except (asyncio.IncompleteReadError, asyncio.CancelledError):
+        except (asyncio.IncompleteReadError, asyncio.CancelledError) as e:
+            if self._running:
+                self.log.exception("Remote Close")
+            else:
+                self.log.debug("_recv closing: %s", e)
             return # connection closed
         except:
             self.log.exception('Error in Connnection RX')

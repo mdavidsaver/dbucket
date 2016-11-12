@@ -97,8 +97,8 @@ class SignalManager(object):
     def __init__(self, proxy, signame):
         self.proxy, self.signame = proxy, signame
     @asyncio.coroutine
-    def connect(self):
-        Q = self.proxy._dbus_connection.new_queue()
+    def connect(self, Q=None):
+        Q = Q or self.proxy._dbus_connection.new_queue()
         yield from Q.add(
             #sender=self.proxy._dbus_destination, #TODO track well-known names and check this?
             path=self.proxy._dbus_path,
@@ -225,6 +225,12 @@ def _infer_sig(*args):
             raise TypeError("Can't infer dbus type for %s"%T)
     return ''.join(sig)
 
+def Interface(name):
+    def decorate(klass):
+        klass._dbus_interface = name
+        return klass
+    return decorate
+
 def Method(*, name=None, interface=None):
     """Apply this decorator to export as a dbus method
 
@@ -301,8 +307,10 @@ def Signal(*args, name=None, interface=None):
             raise TypeError("Signal() methods may not return")
 
         args = []
-        for A in SIG.parameters.values():
-            if A.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+        for i,A in enumerate(SIG.parameters.values()):
+            if i==0 and A.name=='self':
+                continue
+            elif A.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
                 if A.annotation is inspect.Parameter.empty:
                     raise TypeError("Signal() requires annotation of '%s'"%A.name)
                 elif isinstance(A.annotation, str) and len(list(sigsplit(A.annotation.encode('ascii'))))!=1:
@@ -358,12 +366,11 @@ def Signal(*args, name=None, interface=None):
 class ExportNode(dict):
     def __init__(self, name, fullpath, *, parent=None):
         self.name, self.fullpath, self.obj, self.parent = name, fullpath, None, parent
-        self.children = {}
         if parent is not None:
-            parent.children[name] = self
+            parent[name] = self
 
         self.xml = None
-        self.node_xml = '<node></node>'
+        self.node_xml = IDOCTYPE+'<node></node>'
 
     @Method()
     def Introspect(self) -> str:
@@ -372,13 +379,13 @@ class ExportNode(dict):
                 self.xml = self.node_xml
             else:
                 node = ET.fromstring(self.node_xml)
-                for C in self.children:
+                for C in self.values():
                     ET.SubElement(node, 'node', name=C.name)
-                self.xml = ET.tostring(node)
+                self.xml = IDOCTYPE+ET.tostring(node).decode('ascii')
 
         return self.xml
 
-    def attach(self, obj, *, interface=None):
+    def attach(self, obj):
         self.xml = None
         if hasattr(obj, 'detach'):
             raise RuntimeError("detach would be replaced be generated detech() method")
@@ -393,13 +400,15 @@ class ExportNode(dict):
         methods = {
             (INTROSPECTABLE, 'Introspect'):self.Introspect,
         }
+        # our test code assumes stable iteration order of members
         for K,V in inspect.getmembers(obj):
-            if interface is None and hasattr(V, '_dbus_interface') and V._dbus_interface is None:
-                raise ValueError("Default interface name required as '%s' specifies no interface"%K)
-
             if not hasattr(V, '_dbus_xml'):
                 continue
-            iface = V._dbus_interface or interface
+
+            try:
+                iface = V._dbus_interface or obj._dbus_interface
+            except AttributeError:
+                raise ValueError("Default interface name required as '%s' specifies no interface.  Add @Interface('...') to %s definition"%(K, obj.__class__.__name__))
 
             inode = root.find("interface[@name='%s']"%iface) or ET.SubElement(root, 'interface', name=iface)
 
@@ -413,15 +422,18 @@ class ExportNode(dict):
 
             methods[(iface, mname)] = V
 
-        self.node_xml = ET.tostring(root)
+        self.node_xml = IDOCTYPE+ET.tostring(root).decode('ascii')
 
         self.methods = methods
         self.obj = obj
 
-    def detech(self):
+    def detach(self):
+        if self.obj is not None:
+            del self.obj._dbus_connection
+            del self.obj._dbus_path
         self.obj = self.methods = None
-        #if len(self.children)==0 and self.parent is not None:
-        #    del self.parent.children[self]
+        #if len(self)==0 and self.parent is not None:
+        #    del self.parent[self]
 
         self.xml = None
         self.node_xml = '<node></node>'
@@ -439,38 +451,36 @@ class MethodDispatch(object):
     def _get_node(self, path):
         assert path[0]=='/', path
         parts = path[1:].split('/')
+        if parts==['']:
+            parts = []
         node = self.root
         for P in parts:
             try:
-                node = node.children[P]
+                node = node[P]
             except KeyError:
-                node = node.children[P] = self.Node(P, path, parent=node)
+                node = node[P] = self.Node(P, path, parent=node)
         return node
 
-    def attach(self, obj, *, path='/', interface=None):
+    def attach(self, obj, *, path='/'):
         assert path[0]=='/', path
         node = self._get_node(path)
         if node.obj is not None:
             raise RuntimeError("Path %s is already attached by %s"%(path, node.obj))
 
-        node.attach(obj, interface=interface)
+        node.attach(obj)
         self._dispatch[path] = node
+        obj._dbus_connection = self.conn
+        obj._dbus_path = path
 
     def detach(self, path):
-        node = self._get_node(path)
-        if node is not None:
-            node.detach()
+        self._get_node(path).detach()
 
     def handle(self, evt):
+        """Call method and return (value, 'sig')
+        """
         node = self._dispatch.get(evt.path)
         if node is None:
             raise RemoteError('No path', UNKNOWNOBJECT)
-
-        if evt.interface==INTROSPECTABLE:
-            if evt.member!='Introspect':
-                raise RemoteError('No Method', UNKNOWNMETHOD)
-
-            return node.xml, 's'
 
         M = node.methods[(evt.interface, evt.member)]
 

@@ -3,7 +3,7 @@ import unittest, asyncio
 import xml.etree.ElementTree as ET
 
 from ..conn import DBUS, DBUS_PATH, METHOD_CALL, BusEvent
-from ..proxy import buildProxy, ProxyBase, Method, Signal, MethodDispatch
+from ..proxy import buildProxy, ProxyBase, Interface, Method, Signal, MethodDispatch, INTROSPECTABLE, IDOCTYPE
 from .util import inloop, FakeConnection
 
 class TestBuilder(unittest.TestCase):
@@ -124,28 +124,135 @@ class TestExport(unittest.TestCase):
         self.assertEqual(Test.Sig3._dbus_sig, 'ii')
 
 class TestDispatch(unittest.TestCase):
+    maxDiff = 64*1024
+    @Interface('foo.Op')
     class Test(object):
-        @Method(interface='foo.Op')
+        @Method(interface='foo.Other')
         def Zero(self) -> int:
             return 0
-        @Method(interface='foo.Op')
+        @Method()
         def Inv(self, a:int) -> int:
             return -a
-        @Method(interface='foo.Op')
+        @Method()
         def Add(self, a:int, b:int) -> int:
             return a+b
+        @Method()
+        def Noop(self):
+            pass
+        @Signal()
+        def Emit(self, a:int):
+            pass
 
     def setUp(self):
         self.conn = FakeConnection()
         self.disp = MethodDispatch(self.conn)
         self.inst = self.Test()
         self.disp.attach(self.inst)
+        self.assertIs(self.inst._dbus_connection, self.conn)
+        self.assertEqual(self.inst._dbus_path, '/')
+
+    def tearDown(self):
+        self.disp.detach('/')
+        self.assertFalse(hasattr(self.inst, '_dbus_connection'))
+        self.assertFalse(hasattr(self.inst, '_dbus_path'))
+
+    def test_Introspect(self):
+        val, sig = self.disp.handle(BusEvent.build(METHOD_CALL, 1,
+            path='/',
+            interface=INTROSPECTABLE,
+            member='Introspect',
+        ))
+
+        self.assertEqual(sig, 's')
+        self.assertEqual(val, ''.join([IDOCTYPE,
+                                       '<node>',
+                                       '<interface name="org.freedesktop.DBus.Introspectable">',
+                                        '<method name="Introspect">',
+                                            '<arg dir="out" type="s" />',
+                                        '</method>',
+                                       '</interface>',
+                                       '<interface name="foo.Op">',
+                                        '<method name="Add">',
+                                            '<arg direction="in" type="i" />',
+                                            '<arg direction="in" type="i" />',
+                                            '<arg direction="out" type="i" />',
+                                        '</method>',
+                                        '<signal name="Emit">',
+                                            '<arg direction="out" type="i" />',
+                                        '</signal>',
+                                        '<method name="Inv">',
+                                            '<arg direction="in" type="i" />',
+                                            '<arg direction="out" type="i" />',
+                                        '</method><method name="Noop" />',
+                                       '</interface>',
+                                       '<interface name="foo.Other">',
+                                        '<method name="Zero">',
+                                            '<arg direction="out" type="i" />',
+                                        '</method>',
+                                       '</interface>',
+                                       '</node>']))
+
+    def test_Introspect2(self):
+        inst2 = self.Test()
+        self.disp.attach(inst2, path='/foo')
+        self.assertIs(inst2._dbus_connection, self.conn)
+        self.assertEqual(inst2._dbus_path, '/foo')
+
+        val, sig = self.disp.handle(BusEvent.build(METHOD_CALL, 1,
+            path='/',
+            interface=INTROSPECTABLE,
+            member='Introspect',
+        ))
+
+        self.assertEqual(sig, 's')
+        self.assertEqual(val, ''.join([IDOCTYPE,
+                                       '<node>',
+                                       '<interface name="org.freedesktop.DBus.Introspectable">',
+                                        '<method name="Introspect">',
+                                            '<arg dir="out" type="s" />',
+                                        '</method>',
+                                       '</interface>',
+                                       '<interface name="foo.Op">',
+                                        '<method name="Add">',
+                                            '<arg direction="in" type="i" />',
+                                            '<arg direction="in" type="i" />',
+                                            '<arg direction="out" type="i" />',
+                                        '</method>',
+                                        '<signal name="Emit">',
+                                            '<arg direction="out" type="i" />',
+                                        '</signal>',
+                                        '<method name="Inv">',
+                                            '<arg direction="in" type="i" />',
+                                            '<arg direction="out" type="i" />',
+                                        '</method><method name="Noop" />',
+                                       '</interface>',
+                                       '<interface name="foo.Other">',
+                                        '<method name="Zero">',
+                                            '<arg direction="out" type="i" />',
+                                        '</method>',
+                                       '</interface>',
+                                       '<node name="foo" />',
+                                       '</node>']))
+
+
+        self.disp.detach('/foo')
+
+    def test_Noop(self):
+
+        val, sig = self.disp.handle(BusEvent.build(METHOD_CALL, 1,
+            path='/',
+            interface='foo.Op',
+            member='Noop',
+        ))
+
+        self.assertEqual(sig, '')
+        self.assertEqual(val, None)
 
     def test_Zero(self):
 
         val, sig = self.disp.handle(BusEvent.build(METHOD_CALL, 1,
             path='/',
-            interface='foo.Op',
+            interface='foo.Other',
             member='Zero',
         ))
 
@@ -177,3 +284,14 @@ class TestDispatch(unittest.TestCase):
 
         self.assertEqual(sig, 'i')
         self.assertEqual(val, 4)
+
+    def test_Emit(self):
+        Q = self.inst.Emit(42)
+        self.assertEqual(len(self.conn._signals), 1)
+        evt = self.conn._signals.pop(0)
+
+        self.assertEqual(evt.member, 'Emit')
+        self.assertEqual(evt.interface, 'foo.Op')
+        self.assertEqual(evt.path, '/')
+
+        self.assertListEqual(self.conn._signals, [])
