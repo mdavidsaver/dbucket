@@ -151,7 +151,7 @@ class Connection(object):
         """
         if not self._running:
             return
-        self.log.info("Closing")
+        self.log.debug("Closing")
         self._W.close()
         self._running = False
         # join the receiver Task
@@ -182,7 +182,7 @@ class Connection(object):
         # intended to help with a clean shutdown when used
         # like 'loop.run_until_complete(conn.close())'
         yield from _loop_sync(self._loop)
-        self.log.info("Closed")
+        self.log.debug("Closed")
 
     @property
     def name(self):

@@ -57,22 +57,42 @@ class ProxyBase(object):
         self._dbus_destination = destination
         self._dbus_path = path
 
+    def proxy(self, path, *, interface=None):
+        """coroutine yielding a proxy to the specified path
+        """
+        return self._dbus_connection.proxy(
+            destination = self._dbus_destination,
+            interface = interface,
+            path=path,
+        )
+
+    def __getitem__(self, path):
+        """coroutine yielding a proxy to the specified path
+        """
+        return self.proxy(path)
+
     @asyncio.coroutine
     def setup(self):
-        for name, doc in self._dbus_signals:
-            M = SignalManager(self, name)
+        for name, iface, doc in self._dbus_signals:
+            M = SignalManager(self, iface, name)
             M.__doc__ = doc
             setattr(self, name, M)
         return self
 
-def makeCall(mname, sig, nargs):
+    def __repr__(self):
+        return '%s("%s", "%s")'%(self.__class__.__name__,
+                                 self._dbus_destination,
+                                 self._dbus_path)
+    __str__ = __repr__
+
+def makeCall(iface, mname, sig, nargs):
     if nargs==0:
         @asyncio.coroutine
         def meth(self):
             return (yield from self._dbus_connection.call(
                 destination=self._dbus_destination,
                 path=self._dbus_path,
-                interface=self._dbus_interface,
+                interface=iface,
                 member=mname,
             ))
     else:
@@ -82,7 +102,7 @@ def makeCall(mname, sig, nargs):
             return (yield from self._dbus_connection.call(
                 destination=self._dbus_destination,
                 path=self._dbus_path,
-                interface=self._dbus_interface,
+                interface=iface,
                 member=mname,
                 sig=sig,
                 body=args
@@ -93,15 +113,15 @@ def makeCall(mname, sig, nargs):
     return meth
 
 class SignalManager(object):
-    def __init__(self, proxy, signame):
-        self.proxy, self.signame = proxy, signame
+    def __init__(self, proxy, iface, signame):
+        self.proxy, self.interface, self.signame = proxy, iface, signame
     @asyncio.coroutine
     def connect(self, Q=None):
         Q = Q or self.proxy._dbus_connection.new_queue()
         yield from Q.add(
             #sender=self.proxy._dbus_destination, #TODO track well-known names and check this?
             path=self.proxy._dbus_path,
-            interface=self.proxy._dbus_interface,
+            interface=self.interface,
             member=self.signame,
         )
         return Q
@@ -133,62 +153,70 @@ class PropertyAccessor(object):
         ))
 
 def buildProxy(xml, *, interface=None):
-    node = xml.find("interface[@name='%s']"%interface)
-    if node is None:
-        raise RuntimeError("No interface %s"%interface)
+    if interface is not None:
+        if xml.find("interface[@name='%s']"%interface) is None:
+            raise RuntimeError("No interface %s"%interface)
+        search = "interface[@name='%s']"%interface
+    else:
+        search = "interface"
+        interface = xml.find('interface').attrib['name']
 
+    klassname = interface.replace('.','_')
     klass={
         '_dbus_interface':interface,
         #TODO: __doc__
     }
-
-    for mnode in node.findall('method'):
-        """<method name="GetConnectionCredentials">
-              <arg direction="in" type="s"/>
-              <arg direction="out" type="a{sv}"/>
-           </method>
-        """
-        name = mnode.attrib['name']
-        sig, ret = [], []
-        for argnode in mnode.findall('arg'):
-            if argnode.attrib['direction']=='in':
-                sig.append(argnode.attrib['type'])
-            elif argnode.attrib['direction']=='out':
-                ret.append(argnode.attrib['type'])
-
-        meth = makeCall(name, ''.join(sig), len(sig))
-        meth.__name__ = name
-        meth.__doc__ = '{ret} = {name}({arg})\n========================\n{xml}'.format(
-            ret = ', '.join(ret),
-            arg = ', '.join(sig),
-            name = name,
-            xml = ET.tostring(mnode),
-        )
-        klass[name] = meth
-
     sigs = []
-    for snode in node.findall('signal'):
-        """<signal name="NameOwnerChanged">
-            <arg type="s"/>
-            <arg type="s"/>
-            <arg type="s"/>
-           </signal>
-        """
-        name = snode.attrib['name']
-        doc = 'signal {name} -> {sig}\n========================\n{xml}'.format(
-            name = name,
-            sig = ''.join([N.attrib['type'] for N in snode.findall('arg')]),
-            xml = ET.tostring(snode),
-        )
-        sigs.append((name, doc))
-    klass['_dbus_signals'] = sigs
 
-    for pnode in node.findall('property'):
-        '<property name="Bar" type="y" access="readwrite"/>'
-        name, sig = pnode.attrib['name'], pnode.attrib['type']
-        klass[name] = PropertyAccessor(sig, interface, name)
+    for iface in xml.findall(search):
+        iname = iface.attrib['name']
+        for mnode in iface.findall('method'):
+            """<method name="GetConnectionCredentials">
+                <arg direction="in" type="s"/>
+                <arg direction="out" type="a{sv}"/>
+            </method>
+            """
+            name = mnode.attrib['name']
+            sig, ret = [], []
+            for argnode in mnode.findall('arg'):
+                if argnode.attrib['direction']=='in':
+                    sig.append(argnode.attrib['type'])
+                elif argnode.attrib['direction']=='out':
+                    ret.append(argnode.attrib['type'])
 
-    return type(interface.replace('.','_'), (ProxyBase,), klass)
+            meth = makeCall(iname, name, ''.join(sig), len(sig))
+            meth.__name__ = name
+            meth.__doc__ = '{ret} = {iface}.{name}({arg})\n========================\n{xml}'.format(
+                ret = ', '.join(ret),
+                arg = ', '.join(sig),
+                name = name,
+                iface = iname,
+                xml = ET.tostring(mnode),
+            )
+            klass[name] = meth
+
+        for snode in iface.findall('signal'):
+            """<signal name="NameOwnerChanged">
+                <arg type="s"/>
+                <arg type="s"/>
+                <arg type="s"/>
+            </signal>
+            """
+            name = snode.attrib['name']
+            doc = 'signal {name} -> {sig}\n========================\n{xml}'.format(
+                name = name,
+                sig = ''.join([N.attrib['type'] for N in snode.findall('arg')]),
+                xml = ET.tostring(snode),
+            )
+            sigs.append((name, iname, doc))
+        klass['_dbus_signals'] = sigs
+
+        for pnode in iface.findall('property'):
+            '<property name="Bar" type="y" access="readwrite"/>'
+            name, sig = pnode.attrib['name'], pnode.attrib['type']
+            klass[name] = PropertyAccessor(sig, iname, name)
+
+    return type(klassname, (ProxyBase,), klass)
 
 @asyncio.coroutine
 def createProxy(conn, *, destination=None, path=None, interface=None):

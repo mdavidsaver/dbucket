@@ -13,6 +13,8 @@ class TestBuilder(unittest.TestCase):
   <interface name="org.freedesktop.DBus.Other">
     <method name="Hello">
     </method>
+    <method name="Other">
+    </method>
   </interface>
   <interface name="org.freedesktop.DBus">
     <method name="Hello">
@@ -36,13 +38,15 @@ class TestBuilder(unittest.TestCase):
     def test_call0(self):
         klass = buildProxy(self.root, interface=DBUS)
 
+        self.assertFalse(hasattr(klass, 'Other'))
+
         self.assertTrue(hasattr(klass, 'Hello'))
         self.assertEqual(klass.Hello._dbus_sig, '')
-        self.assertRegex(klass.Hello.__doc__, r's = Hello\(\)')
+        self.assertRegex(klass.Hello.__doc__, r's = org.freedesktop.DBus.Hello\(\)')
 
         self.assertTrue(hasattr(klass, 'ListQueuedOwners'))
         self.assertEqual(klass.ListQueuedOwners._dbus_sig, 's')
-        self.assertRegex(klass.ListQueuedOwners.__doc__, r'as = ListQueuedOwners\(s\)')
+        self.assertRegex(klass.ListQueuedOwners.__doc__, r'as = org.freedesktop.DBus.ListQueuedOwners\(s\)')
 
         inst = klass(self.conn, destination=DBUS, path=DBUS_PATH)
 
@@ -65,6 +69,13 @@ class TestBuilder(unittest.TestCase):
         ret = yield from inst.ListQueuedOwners('test')
         self.assertEqual(ret, [])
 
+    @inloop
+    @asyncio.coroutine
+    def test_all_interfaces(self):
+        klass = buildProxy(self.root)
+
+        self.assertTrue(hasattr(klass, 'Other'))
+        self.assertTrue(hasattr(klass, 'ListQueuedOwners'))
 
 class TestExport(unittest.TestCase):
 
