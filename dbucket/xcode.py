@@ -185,8 +185,10 @@ def decode(sig, buffer, lsb=_sys_lsb, bpos=0, debug=False):
         remain, bpos = D.buffer, D.bpos
     except Exception as e:
         raise ValueError("Error %s while decoding %s %s.  %s"%(e, sig, repr(buffer), D))
-    if bpos!=len(buffer) or len(remain)!=0:
-        raise ValueError("Incomplete decode: %s"%repr(remain))
+    if bpos!=len(buffer):
+        raise ValueError("Incomplete decode: %d/%d while decoding %s %s.  %s"%(bpos, len(buffer), sig, repr(buffer), D))
+    elif len(remain)!=0:
+        raise ValueError("Incomplete decode: %s while decoding %s %s.  %s"%(repr(remain), sig, repr(buffer), D))
     if isinstance(R, tuple) and len(R)==1:
         return R[0]
     else:
@@ -261,6 +263,7 @@ class Encoder(object):
 
             if selem[0]==ord(b'('):
                 assert selem[-1]==ord(b')'), selem
+                # start of any sub-struct is aligned to worst case
                 self.align(8)
 
                 self.encode(selem[1:-1], mem)
@@ -298,13 +301,14 @@ class Encoder(object):
                 # insert real size
                 self.bufs[sizeidx] = struct.pack(self.L+"I", self.bpos-ipos)
 
-            elif selem[0] in (ord(b'g'),):
+            elif selem[0] in (ord(b'g'),): # SIGNATURE
                 N = len(mem)
                 assert N<=255
                 self.bpos += N+2
                 self.bufs.append(struct.pack("B", N)+mem+b'\0')
 
-            elif selem[0] in (ord(b's'),ord(b'o')):
+            elif selem[0] in (ord(b's'),ord(b'o')): # STRING or OBJECT_PATH
+                self.align(4)
                 N = len(mem)
                 self.bpos += N+5
                 if hasattr(mem, 'encode'):
