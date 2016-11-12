@@ -29,17 +29,21 @@ _elem = numpy.dtype([
 def getData(since):
     conn = yield from connect_bus(get_system_infos())
     try:
-        UP = yield from createProxy(conn,
-                                    destination=UPOWER,
-                                    interface=UPOWER,
-                                    path=UPOWER_PATH,
-                                    )
+        UP = yield from conn.proxy(
+            destination=UPOWER,
+            interface=UPOWER,
+            path=UPOWER_PATH,
+        )
 
         rate, charge = {}, {}
         devices = yield from UP.EnumerateDevices()
         for dpath in devices:
             print("Device", dpath)
-            dev = yield from createProxy(conn, destination=UPOWER, interface=DEVICE, path=dpath)
+            dev = yield from conn.proxy(
+                destination=UPOWER,
+                interface=DEVICE,
+                path=dpath
+            )
 
             try:
                 rate[dpath]   = yield from dev.GetHistory('rate', int(since*60), 60)
