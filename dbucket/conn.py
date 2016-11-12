@@ -199,6 +199,10 @@ class Connection(object):
         'Connected?'
         return self._running
 
+    @property
+    def loop(self):
+        return self._loop
+
     @asyncio.coroutine
     def AddMatch(self, obj, expr):
         '''Register match expression with dbus daemon and associate it with *obj*.
