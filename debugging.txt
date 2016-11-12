@@ -1,7 +1,16 @@
 Build dbus from source with '--enable-verbose-mode',
+
+```sh
+$ apt-get source dbus
+$ cd dbus*
+$ ./configure --prefix=$PWD/usr --with-systemdsystemunitdir=$PWD/lib/systemd --enable-verbose-mode
+```
+
 then run
 
-DBUS_VERBOSE=1 dbus-run-session --dbus-daemon=<path/to/dbus-daemon> -- nosetests3
+```sh
+DBUS_VERBOSE=1 dbus-run-session --dbus-daemon=<path/to>/dbus-daemon -- nosetests3
+```
 
 ```
 3284: [dbus/dbus-transport.c(1185):_dbus_transport_queue_messages] Corrupted message stream, disconnecting

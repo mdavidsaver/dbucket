@@ -23,8 +23,8 @@ class TestPeer(unittest.TestCase):
         @Method()
         def Echo(self, s:str) -> str:
             return s+' world'
-        @asyncio.coroutine
         @Method()
+        @asyncio.coroutine
         def DelayEcho(self, s:str) -> str:
             return s+' is a test'
         @Signal()
@@ -36,6 +36,7 @@ class TestPeer(unittest.TestCase):
     def setUp(self):
         self.client = yield from connect_bus(get_session_infos(), loop=self.loop)
         self.server = yield from connect_bus(get_session_infos(), loop=self.loop)
+        self.server.debug_net = True
         try:
             self.serverobj = self.Foo()
             self.server.attach(self.serverobj, path=self.servpath)
@@ -80,6 +81,12 @@ class TestPeer(unittest.TestCase):
     def test_callecho(self):
         msg = yield from self.obj.Echo('hello')
         self.assertEqual(msg, 'hello world')
+
+    @inloop
+    @asyncio.coroutine
+    def test_callechodelay(self):
+        msg = yield from self.obj.DelayEcho('hello')
+        self.assertEqual(msg, 'hello is a test')
 
     @inloop
     @asyncio.coroutine

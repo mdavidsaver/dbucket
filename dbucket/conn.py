@@ -9,6 +9,7 @@ import asyncio
 ensure_future = getattr(asyncio, 'ensure_future', asyncio.async)
 
 from .xcode import encode, decode, Object, Signature, Variant
+from .valid import is_interface
 from .signal import SignalQueue, Condition
 
 #: Bus name and Interface name for DBUS daemon
@@ -40,7 +41,7 @@ class ConnectionClosed(asyncio.CancelledError):
 
 class RemoteError(RuntimeError):
     'Thrown when a DBus Error is received'
-    def __init__(self, msg, name):
+    def __init__(self, msg, *, name='dbucket.UncatagorizedError'):
         RuntimeError.__init__(self, msg)
         self.name = name
 
@@ -344,6 +345,11 @@ class Connection(object):
         self._send(header, bodystr)
 
     def _error(self, event, name, msg):
+        self.log.debug("error %s %s %s", event, name, msg)
+        if not is_interface(name):
+            self.log.warn('Invalid error name "%s"', name)
+            name = 'dbucket.InvalidErrorName'
+        msg = str(msg or name)
         opts = [
             (4, str(name)), # error name
             (5, Variant(b'u', event.serial)),
@@ -352,9 +358,8 @@ class Connection(object):
         ]
         if not self._running:
             return
-        
-        self.log.debug("error %s %s %s", event, name, msg)
-        body = encode(b's', str(msg or name))
+
+        body = encode(b's', msg)
         msg = (ord(_sys_L), ERROR, 0, 1,   len(body), self.get_sn(),   opts)
         self.log.debug("error message %s %s", msg, body)
         header = encode(b'yyyyuua(yv)', msg)
@@ -394,7 +399,7 @@ class Connection(object):
 
         rest = yield from self._R.readexactly(fullsize)
         if self.debug_net:
-            self.log.debug("recv message", rest)
+            self.log.debug("recv message %s", rest)
         headers, body = head+rest[:hlen], rest[bstart:]
         #self.log.debug('Raw Headers=%s body=%s', headers, body)
 
@@ -412,15 +417,17 @@ class Connection(object):
 
         return evt
 
-    def _evt_return(self, F, evt=None):
+    def _evt_return(self, evt, sig, F):
         try:
-            val, sig = F.result()
+            val = F.result()
         except asyncio.CancelledError:
             pass
         except RemoteError as e:
-            self._error(evt, e.name, str(e))
+            self._error(evt, e.name, repr(e))
         except Exception as e:
-            self._error(evt, e.__class__.__name__, str(e))
+            self.log.exception("Error calling method %s", evt)
+            name = "%s.%s"%(e.__class__.__module__, e.__class__.__name__)
+            self._error(evt, name, repr(e))
         else:
             self._method_return(evt, sig, val)
 
@@ -430,21 +437,14 @@ class Connection(object):
             while True:
                 evt = yield from self._recv_msg()
 
-                if evt.type==METHOD_CALL:
-                    try:
-                        ret = self._methods.handle(evt)
-                        if asyncio.iscoroutine(ret):
-                            ret = ensure_future(ret)
-                        if isinstance(ret, asyncio.Future):
-                            ret.add_done_callback(functools.partial(self._evt_return, evt=evt))
-                        else:
-                            val, sig = ret
-                            self._method_return(evt, sig, val)
-                    except RemoteError as e:
-                        self._error(evt, e.name, str(e))
-                    except Exception as e:
-                        self._error(evt, e.__class__.__name__, str(e))
-                        
+                if evt.type==SIGNAL:
+                    used = False
+                    for M in self._signals:
+                        used |= M._emit(evt)
+                    if not used:
+                        # this may happen naturally due to races with RemoveMatch
+                       self.log.debug("Ignored signal %s", evt)
+
                 elif evt.type in (METHOD_RETURN, ERROR): 
                     rsn = evt._return_sn
                     try:
@@ -453,17 +453,29 @@ class Connection(object):
                         self.log.warn('Received reply/error with unknown S/N %s', rsn)
                     else:
                         if not F.cancelled():
-                            if evt.type==2:
+                            if evt.type==METHOD_RETURN:
                                 F.set_result(evt.body)
                             else:
-                                F.set_exception(RemoteError(evt.body or evt._error, evt._error))
-                elif evt.type==SIGNAL:
-                    used = False
-                    for M in self._signals:
-                        used |= M._emit(evt)
-                    if not used:
-                        # this may happen naturally due to races with RemoveMatch
-                       self.log.debug("Ignored signal %s", evt)
+                                F.set_exception(RemoteError(evt.body, name=evt._error))
+                        else:
+                            self.log.debug("Ignore reply to cancelled call %s", evt)
+
+                elif evt.type==METHOD_CALL:
+                    try:
+                        ret, sig = self._methods.handle(evt)
+                        if asyncio.iscoroutine(ret):
+                            ret = ensure_future(ret)
+                        if isinstance(ret, asyncio.Future):
+                            ret.add_done_callback(partial(self._evt_return, evt, sig))
+                        else:
+                            self._method_return(evt, sig, ret)
+                    except RemoteError as e:
+                        self._error(evt, e.name, repr(e))
+                    except Exception as e:
+                        self.log.exception("Error calling method %s", evt)
+                        name = "%s.%s"%(e.__module__, e.__class__.__name__)
+                        self._error(evt, name, repr(e))
+
                 else:
                     self.log.debug('Ignoring unknown dbus message type %s', evt.type)
 

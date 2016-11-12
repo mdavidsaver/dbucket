@@ -6,7 +6,7 @@ from collections import defaultdict
 import asyncio, functools, inspect
 import xml.etree.ElementTree as ET
 
-from .conn import Variant, RemoteError
+from .conn import Variant, RemoteError, UnknownMethod
 from .xcode import sigsplit
 
 INTROSPECTABLE='org.freedesktop.DBus.Introspectable'
@@ -480,9 +480,12 @@ class MethodDispatch(object):
         """
         node = self._dispatch.get(evt.path)
         if node is None:
-            raise RemoteError('No path', UNKNOWNOBJECT)
+            raise RemoteError('No path', name=UNKNOWNOBJECT)
 
-        M = node.methods[(evt.interface, evt.member)]
+        try:
+            M = node.methods[(evt.interface, evt.member)]
+        except KeyError:
+            raise RemoteError("Unknown method %s.%s"%(evt.interface, evt.member), name=UnknownMethod)
 
         if M._dbus_nsig==0:
             return M(), M._dbus_return
