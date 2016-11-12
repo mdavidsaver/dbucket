@@ -251,12 +251,12 @@ class Connection(object):
         return SN
 
     def _send(self, header, body):
-            M = len(header)%8
-            pad = b'\0'*(8-M) if M else b''
-            S = [header, pad, body]
-            self._W.writelines(S)
-            if self.debug_net:
-                self.log.debug("send message serialized %s", S)
+        M = len(header)%8
+        pad = b'\0'*(8-M) if M else b''
+        S = [header, pad, body]
+        self._W.writelines(S)
+        if self.debug_net:
+            self.log.debug("send message serialized %s", S)
  
     def call(self, *, path=None, interface=None, member=None, destination=None, sig=None, body=None):
         '''Call remote method

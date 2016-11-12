@@ -10,11 +10,10 @@ from .conn import Variant, RemoteError, UnknownMethod
 from .xcode import sigsplit
 
 INTROSPECTABLE='org.freedesktop.DBus.Introspectable'
+PROPERTIES = 'org.freedesktop.DBus.Properties'
 
 IDOCTYPE = '''<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
 "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">\n'''
-
-PROPERTIES = 'org.freedesktop.DBus.Properties'
 
 UNKNOWNMETHOD = "org.freedesktop.DBus.Error.UnknownMethod"
 UNKNOWNOBJECT = "org.freedesktop.DBus.Error.UnknownObject"
@@ -116,8 +115,8 @@ class PropertyAccessor(object):
         return (yield from inst._dbus_connection.call(
             destination = inst._dbus_destination,
             path = inst._dbus_path,
-            iface = PROPERTIES,
-            method = 'Get',
+            interface = PROPERTIES,
+            member = 'Get',
             sig = 'ss',
             body = (self._iface or inst._dbus_interface, self._name),
         ))
@@ -127,14 +126,16 @@ class PropertyAccessor(object):
         return (yield from inst._dbus_connection.call(
             destination = inst._dbus_destination,
             path = inst._dbus_path,
-            iface = PROPERTIES,
-            method = 'Get',
+            interface = PROPERTIES,
+            member = 'Get',
             sig = 'ssv',
             body = (self._iface or inst._dbus_interface, self._name, Variant(self._sig, value)),
         ))
 
 def buildProxy(xml, *, interface=None):
     node = xml.find("interface[@name='%s']"%interface)
+    if node is None:
+        raise RuntimeError("No interface %s"%interface)
 
     klass={
         '_dbus_interface':interface,
@@ -198,11 +199,14 @@ def createProxy(conn, *, destination=None, path=None, interface=None):
         member='Introspect',
     )
 
-    #TODO: cache klass?
-    root = ET.fromstring(raw)
-    klass = buildProxy(root, interface=interface)
+    try:
+        #TODO: cache klass?
+        root = ET.fromstring(raw)
+        klass = buildProxy(root, interface=interface)
 
-    return (yield from klass(conn, destination=destination, path=path).setup())
+        return (yield from klass(conn, destination=destination, path=path).setup())
+    except Exception as e:
+        raise RuntimeError("%s while building proxy for %s %s %s"%(e, destination, path, interface))
 
 def _infer_sig(*args):
     """Guess dbus type signature based on python classes provided
