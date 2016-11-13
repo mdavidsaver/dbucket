@@ -38,13 +38,18 @@ def get_session_infos():
     if 'DBUS_SESSION_BUS_ADDRESS' in os.environ:
         yield makedict(os.environ['DBUS_SESSION_BUS_ADDRESS'])
     sbase = os.path.expanduser('~/.dbus/session-bus')
-    for sdir in os.listdir(sbase):
-        with open(os.path.join(sbase,sdir),'r') as F:
-            for L in F:
-                if L.startswith('DBUS_SESSION_BUS_ADDRESS='):
-                    _key, _sep, val = L.strip().partition('=')
-                    yield makedict(val)
-                    break
+    try:
+        contents = os.listdir(sbase)
+    except FileNotFoundError:
+        pass
+    else:
+        for sdir in contents:
+            with open(os.path.join(sbase,sdir),'r') as F:
+                for L in F:
+                    if L.startswith('DBUS_SESSION_BUS_ADDRESS='):
+                        _key, _sep, val = L.strip().partition('=')
+                        yield makedict(val)
+                        break
 
 def get_system_infos():
     for loc in ('/var/run/dbus/system_bus_socket',):
