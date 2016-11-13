@@ -9,4 +9,8 @@ addons:
     - dbus
 install:
   - pip install -r requirements.txt
-  - nosetests
+script:
+  - nosetests dbucket.test.test_escape
+  - nosetests dbucket.test.test_match
+  - nosetests dbucket.test.test_proxy
+  - nosetests dbucket.test.test_xcode
