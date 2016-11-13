@@ -2,7 +2,7 @@
 
 import logging
 _log = logging.getLogger(__name__)
-import asyncio, signal
+import asyncio, signal, sys
 
 from dbucket.conn import RemoteError
 from dbucket.auth import connect_bus, get_system_infos
@@ -29,7 +29,8 @@ def onStateChange(conn, netman, state):
 
         # routes to get SSID
         #
-        # netman -> PrimaryConnection -> SpecificObject
+        # netman -> PrimaryConnection -> SpecificObject -> Ssid
+        #  With NetworkManager 0.9.10.0-7 SpecificObject sometimes points to a non-existant AP
         #
         # netman -> PrimaryConnection -> Devices (assume first) -> ActiveAccessPoint -> Ssid
 
@@ -53,7 +54,15 @@ def onStateChange(conn, netman, state):
         if ctype not in ('802-11-wireless',):
             _log.debug('Primary is not WIFI? %s', ctype)
 
-        ap = yield from netman[(yield from con.SpecificObject)]
+        devs = yield from con.Devices
+        if len(devs)==0:
+            _log.error("No devices")
+            return
+        elif len(devs)>1:
+            _log.warn("More than one device, using first")
+        dev = yield from netman[devs[0]]
+
+        ap = yield from netman[(yield from dev.ActiveAccessPoint)]
         _log.info("Access Point %s", ap)
 
         if not hasattr(ap, 'Ssid'):
@@ -89,27 +98,27 @@ def run():
     conn = yield from connect_bus(get_system_infos())
     #conn.debug_net = True
     try:
-        netman = yield from conn.proxy(
-            destination=SERVICE,
-            path=PATH,
-        )
+        netman = yield from conn.proxy(destination=SERVICE, path=PATH)
 
         SIGQ = conn.new_queue()
-        yield from netman.StateChanged.connect(SIGQ)
+        yield from netman.PropertiesChanged.connect(SIGQ)
 
         istate = yield from netman.State
         yield from onStateChange(conn, netman, istate)
 
         def sig():
-            print("SIG")
+            print("Request exit")
             asyncio.async(SIGQ.close(), loop=conn.loop)
 
         conn.loop.add_signal_handler(signal.SIGINT, sig)
         while True:
             print("wait sig")
             evt, sts = yield from SIGQ.recv()
+            if 'PrimaryConnection' not in evt.body:
+                continue
             print("have sig", evt, sts)
-            yield from onStateChange(conn, netman, evt.body)
+            istate = yield from netman.State
+            yield from onStateChange(conn, netman, istate)
 
     finally:
         yield from conn.close()
@@ -124,7 +133,10 @@ def main(args):
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
     loop = asyncio.get_event_loop()
     loop.set_debug(args.debug)
-    loop.run_until_complete(run())
+    try:
+        loop.run_until_complete(run())
+    except asyncio.CancelledError:
+        sys.exit(1)
 
 if __name__=='__main__':
     main(getargs())
