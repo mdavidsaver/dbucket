@@ -1,4 +1,6 @@
 
+import logging
+_log = logging.getLogger(__name__)
 import asyncio
 
 from .escape import escape_match
@@ -131,6 +133,7 @@ class SignalQueue(object):
         if self._done>0:
             return
         self._done = 1
+        _log.debug("Closing signal SignalQueue")
 
         # remove out matches
         conds, self._cond = self._cond, []

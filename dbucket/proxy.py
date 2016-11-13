@@ -230,6 +230,8 @@ def createProxy(conn, *, destination=None, path=None, interface=None):
     try:
         #TODO: cache klass?
         root = ET.fromstring(raw)
+        if root.tag!='node' or root.find('interface') is None:
+            raise RuntimeError("No Introspection data")
         klass = buildProxy(root, interface=interface)
 
         return (yield from klass(conn, destination=destination, path=path).setup())

@@ -11,6 +11,9 @@ __all__ = [
     'get_session_infos',
     'get_system_infos',
     'connect_bus',
+    'with_connection',
+    'with_session',
+    'with_system',
 ]
 
  
@@ -138,3 +141,26 @@ def connect_bus(infos, *,
         return conn
 
     raise RuntimeError('No Bus')
+
+@asyncio.coroutine
+def with_connection(auth_info, func, **kws):
+    """A coroutine which run the provided co-routine add passes in
+    a newly created Connection 'func(conn)'.
+    
+    The connection is closed after the func() completes.
+    
+    This coroutine completes with the value returned by func()
+    
+    Remaining keyword arguments are passed to connect_bus(**kws)
+    """
+    conn = yield from connect_bus(auth_info(), **kws)
+    try:
+        return (yield from func(conn))
+    finally:
+        yield from conn.close()
+
+def with_session(func, **kws):
+    return with_connection(get_session_infos, func, **kws)
+
+def with_system(func, **kws):
+    return with_connection(get_system_infos, func, **kws)

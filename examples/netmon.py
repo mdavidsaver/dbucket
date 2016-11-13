@@ -2,7 +2,7 @@
 
 import logging
 _log = logging.getLogger(__name__)
-import asyncio
+import asyncio, signal
 
 from dbucket.conn import RemoteError
 from dbucket.auth import connect_bus, get_system_infos
@@ -100,8 +100,15 @@ def run():
         istate = yield from netman.State
         yield from onStateChange(conn, netman, istate)
 
+        def sig():
+            print("SIG")
+            asyncio.async(SIGQ.close(), loop=conn.loop)
+
+        conn.loop.add_signal_handler(signal.SIGINT, sig)
         while True:
+            print("wait sig")
             evt, sts = yield from SIGQ.recv()
+            print("have sig", evt, sts)
             yield from onStateChange(conn, netman, evt.body)
 
     finally:

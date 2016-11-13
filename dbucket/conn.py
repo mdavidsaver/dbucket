@@ -103,7 +103,7 @@ class BusEvent(object):
         return evt
 
     def __repr__(self):
-        S = ','.join(["%s='%s'"%(K,getattr(self, K, None)) for K in self._dattrs])
+        S = ','.join(["%s='%s'"%(K,getattr(self, K, None)) for K in self._dattrs+('body',)])
         return "%s(%s)"%(self.__class__.__name__, S)
 
 class Connection(object):
