@@ -2,10 +2,11 @@ sudo: false
 language: python
 python:
   - "3.4"
+  - "3.5"
 addons:
   apt:
     packages:
     - dbus
 install:
   - pip install -r requirements.txt
-  - dbus-run-session -- nosetests3
+  - nosetests
