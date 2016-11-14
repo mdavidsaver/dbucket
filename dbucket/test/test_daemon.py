@@ -21,12 +21,6 @@ class TestDBus(unittest.TestCase):
                                interface=DBUS,
                                path=DBUS_PATH,
         )
-        # another proxy for the dbus daemon (generated)
-        self.obj2 = yield from createProxy(self.conn,
-                               destination=DBUS,
-                               path=DBUS_PATH,
-                               interface=DBUS,
-        )
 
     @inloop
     @asyncio.coroutine
@@ -40,7 +34,7 @@ class TestDBus(unittest.TestCase):
     @inloop
     @asyncio.coroutine
     def test_ListNames(self):
-        names = yield from self.obj2.ListNames()
+        names = yield from self.conn.daemon.ListNames()
         # list should include me
         self.assertIn(self.conn.name, names)
         # list should include the daemon
@@ -53,11 +47,11 @@ class TestDBus(unittest.TestCase):
         """
         myname = 'foo.bar'
 
-        ACQ =     yield from self.obj2.NameAcquired.connect()
-        LOST =    yield from self.obj2.NameLost.connect()
-        CHANGED = yield from self.obj2.NameOwnerChanged.connect()
+        ACQ =     yield from self.conn.daemon.NameAcquired.connect()
+        LOST =    yield from self.conn.daemon.NameLost.connect()
+        CHANGED = yield from self.conn.daemon.NameOwnerChanged.connect()
 
-        ret = yield from self.obj2.RequestName(myname, 4) # Don't Queue
+        ret = yield from self.conn.daemon.RequestName(myname, 4) # Don't Queue
 
         evt, sts = yield from ACQ.recv()
         self.assertEqual(evt.body, myname)
@@ -68,13 +62,13 @@ class TestDBus(unittest.TestCase):
         self.assertEqual(prev, '') # no previous owner
         self.assertEqual(cur, self.conn.name)
 
-        names = yield from self.obj2.ListNames()
+        names = yield from self.conn.daemon.ListNames()
         # list should include me
         self.assertIn(self.conn.name, names)
         self.assertIn(myname, names)
 
-        ret = yield from self.obj2.ListNames()
-        ret = yield from self.obj2.ReleaseName(myname)
+        ret = yield from self.conn.daemon.ListNames()
+        ret = yield from self.conn.daemon.ReleaseName(myname)
         self.assertEqual(ret, 1) # Released
 
         evt, sts = yield from LOST.recv()
@@ -86,7 +80,7 @@ class TestDBus(unittest.TestCase):
         self.assertEqual(prev, self.conn.name)
         self.assertEqual(cur, '') # no owner
 
-        names = yield from self.obj2.ListNames()
+        names = yield from self.conn.daemon.ListNames()
         # list should include me
         self.assertIn(self.conn.name, names)
         self.assertNotIn(myname, names)
@@ -130,8 +124,15 @@ class TestDBus(unittest.TestCase):
     @inloop
     @asyncio.coroutine
     def test_cred(self):
-        # also dests dict decode
-        info = yield from self.obj.call(member='GetConnectionCredentials', sig='s', body=self.conn.name)
+        if hasattr(self.conn.daemon, 'GetConnectionCredentials'):
+            # GetConnectionCredentials added in dbus 1.7
+            # also tests dict decode
+            info = yield from self.conn.daemon.GetConnectionCredentials(self.conn.name)
+        elif sys.platform in ('linux',):
+            info = {}
+            info['UnixUserID'] = (yield from self.conn.daemon.GetConnectionUnixUser(self.conn.name))
+            info['ProcessID'] = (yield from self.conn.daemon.GetConnectionUnixProcessID(self.conn.name))
+
         if sys.platform in ('linux',):
             self.assertEqual(info['UnixUserID'], os.getuid())
             self.assertEqual(info['ProcessID'], os.getpid())
