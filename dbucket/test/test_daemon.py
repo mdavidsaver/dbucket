@@ -3,9 +3,9 @@ import unittest
 import asyncio, functools, os, sys
 
 from ..conn import DBUS, DBUS_PATH, INTROSPECTABLE, RemoteError
-from ..auth import connect_bus, get_session_infos
+from ..auth import connect_bus
 from ..proxy import SimpleProxy, createProxy
-from .util import inloop
+from .util import inloop, test_bus_info
 
 class TestDBus(unittest.TestCase):
     'Talking to the dbus daemon'
@@ -14,7 +14,7 @@ class TestDBus(unittest.TestCase):
     @inloop
     @asyncio.coroutine
     def setUp(self):
-        self.conn = yield from connect_bus(get_session_infos(), loop=self.loop)
+        self.conn = yield from connect_bus(test_bus_info(), loop=self.loop)
         # proxy for dbus daemon
         self.obj = SimpleProxy(self.conn,
                                name=DBUS,
@@ -135,3 +135,20 @@ class TestDBus(unittest.TestCase):
         if sys.platform in ('linux',):
             self.assertEqual(info['UnixUserID'], os.getuid())
             self.assertEqual(info['ProcessID'], os.getpid())
+
+    @inloop
+    @asyncio.coroutine
+    def test_isolation(self):
+        """Try to detect if we are connected to the real session daemon,
+        which would violate our testing isolation.
+        
+        The only well-known name should be the daemon
+        """
+
+        names = yield from self.conn.daemon.ListNames()
+
+        for N in names:
+            unique = N[0]==':'
+            dbus = N==DBUS
+
+            self.assertTrue(unique or dbus, N)

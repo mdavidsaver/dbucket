@@ -7,9 +7,9 @@ import asyncio, functools
 
 from ..conn import DBUS, DBUS_PATH, RemoteError
 from ..signal import SignalQueue
-from ..auth import connect_bus, get_session_infos
+from ..auth import connect_bus
 from ..proxy import Interface, Method, Signal
-from .util import inloop
+from .util import inloop, test_bus_info
 
 class TestPeer(unittest.TestCase):
     'Two peers talking to eachother'
@@ -34,8 +34,8 @@ class TestPeer(unittest.TestCase):
     @inloop
     @asyncio.coroutine
     def setUp(self):
-        self.client = yield from connect_bus(get_session_infos(), loop=self.loop)
-        self.server = yield from connect_bus(get_session_infos(), loop=self.loop)
+        self.client = yield from connect_bus(test_bus_info(), loop=self.loop)
+        self.server = yield from connect_bus(test_bus_info(), loop=self.loop)
         self.server.debug_net = True
         try:
             self.serverobj = self.Foo()

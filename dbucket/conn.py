@@ -258,6 +258,10 @@ class Connection(object):
         M = len(header)%8
         pad = b'\0'*(8-M) if M else b''
         S = [header, pad, body]
+        # seems that with python 3.4.2 underlying .write() can't fail
+        # other than OoM
+        # TCP half-closed isn't supported.
+        # we only find out about close from read side.
         self._W.writelines(S)
         if self.debug_net:
             self.log.debug("send message serialized %s", S)
