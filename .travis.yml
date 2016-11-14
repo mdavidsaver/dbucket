@@ -10,7 +10,4 @@ addons:
 install:
   - pip install -r requirements.txt
 script:
-  - nosetests dbucket.test.test_escape
-  - nosetests dbucket.test.test_match
-  - nosetests dbucket.test.test_proxy
-  - nosetests dbucket.test.test_xcode
+  - nosetests
