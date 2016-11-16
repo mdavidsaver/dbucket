@@ -1,11 +1,12 @@
-import unittest
+import unittest, logging
+_log = logging.getLogger(__name__)
 
 import asyncio, functools, os, sys
 
 from ..conn import DBUS, DBUS_PATH, INTROSPECTABLE, RemoteError
 from ..auth import connect_bus
 from ..proxy import SimpleProxy, createProxy
-from .util import inloop, test_bus_info
+from .util import inloop, test_bus, test_bus_info
 
 class TestDBus(unittest.TestCase):
     'Talking to the dbus daemon'
@@ -153,3 +154,29 @@ class TestDBus(unittest.TestCase):
             dbus = N==DBUS
 
             self.assertTrue(unique or dbus, N)
+
+    @inloop
+    @asyncio.coroutine
+    def test_wait_for_disconnect(self):
+
+        test_bus().stop()
+        try:
+            yield from self.conn._lost
+            self.assertFalse(self.conn.running)
+        finally:
+            test_bus().start()
+
+    @inloop
+    @asyncio.coroutine
+    def test_call_after_restart(self):
+        initial = yield from self.conn.daemon.GetId()
+        self.assertNotEqual(initial, '')
+
+        _log.debug("Force close")
+        yield from test_bus().restart()
+
+        try:
+            after = yield from self.conn.daemon.GetId()
+        except RemoteError as e:
+            _log.debug("XX %s", e.name)
+            self.assertRegex(e.name, 'NoReply')

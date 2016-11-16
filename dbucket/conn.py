@@ -24,6 +24,7 @@ INTROSPECTABLE='org.freedesktop.DBus.Introspectable'
 # see dbus/dbus-protocol.h
 UnknownMethod = 'org.freedesktop.DBus.Error.UnknownMethod'
 LimitsExceed = 'org.freedesktop.DBus.Error.LimitsExceeded'
+NoReply = 'org.freedesktop.DBus.Error.NoReply'
 
 METHOD_CALL = 1
 METHOD_RETURN = 2
@@ -44,6 +45,10 @@ class RemoteError(RuntimeError):
     def __init__(self, msg, *, name='dbucket.UncatagorizedError'):
         RuntimeError.__init__(self, msg)
         self.name = name
+
+class NoReplyError(RemoteError):
+    def __init__(self):
+        RemoteError.__init__(self, "Bus Connection closed/lost", name=NoReply)
 
 def _loop_sync(loop):
     '''Synchronize loop callback queue.
@@ -114,6 +119,8 @@ class Connection(object):
         self.log = logging.getLogger(__name__) # replaced in setup
         self._W, self._R, self._info, self._loop = W, R, info, loop or asyncio.get_event_loop()
         self._running = True
+        self._closed = None
+        self._lost = asyncio.Future(loop=loop)
 
         self._inprog  = {} # in progress method calls we made.  {sn:Future()}
         self._signals = [] # registered signal matches we might receive.  [SignalQueue()]
@@ -143,34 +150,55 @@ class Connection(object):
 
         self._SIGS = self._loop.create_task(self._bus_sig())
 
-    @asyncio.coroutine
-    def close(self, sync=True):
+    def close(self):
         """close out connection.
-        
-        A coroutine
+
+        Immediately starts shutdown process and
+        returns a Future which completes after the connection is closed,
+        and all resulting notifications are delivered.
         """
-        if not self._running:
-            return
         self.log.debug("Closing")
-        self._W.close()
-        self._running = False
-        # join the receiver Task
-        self._RX.cancel()
+        if self._closed is None:
+
+            # non-blocking parts of shutdown
+
+            if self._running:
+                self._W.close()
+            self._running = False
+
+            self._RX.cancel()
+
+            self._cancel_pending()
+
+            # start blocking parts of shudown
+            self._closed = ensure_future(self._close(), loop=self._loop)
+
+            if not self._lost.done():
+                self._lost.set_result(None)
+
+        return self._closed
+
+    def _cancel_pending(self):
+        # fail pending method calls
+        for act in self._inprog.values():
+            if not act.done():
+                act.set_exception(NoReply())
+
+        self._inprog.clear()
+
+    @asyncio.coroutine
+    def _close(self):
 
         # join receiver task, unless we are called from it
         if asyncio.Task.current_task() is not self._RX:
             yield from self._RX
 
-        # fail pending method calls
-        for act in self._inprog.values():
-            if not act.done():
-                act.set_exception(asyncio.CancelledError())
+        self._W.close()
+
+        self._W, self._R = None, None
 
         # notify signal listeners
         F = list([M.close() for M in self._signals])
-
-        # notify method listeners
-#        F.extend([M.close() for M in self._calls])
 
         # wait for notification to be delivered
         yield from asyncio.gather(*F, loop=self._loop, return_exceptions=True)
@@ -275,8 +303,13 @@ class Connection(object):
         assert path is not None, "Method calls require path="
         assert member is not None, "Method calls require member="
         assert sig is None or isinstance(sig, str), "Signature must be str (or None)"
+
+        ret = asyncio.Future(loop=self._loop)
+
         if not self._running:
-            raise ConnectionClosed()
+            ret.set_exception(NoReplyError())
+            return ret
+
         self.log.debug('call %s', (path, interface, member, destination, sig, body))
 
         opts = [
@@ -308,7 +341,7 @@ class Connection(object):
         '''Emit a signal
         '''
         if not self._running:
-            return
+            return # silently drop when not conected
         self.log.debug('signal %s', (path, interface, member, destination, sig, body))
 
         opts = [
@@ -333,6 +366,8 @@ class Connection(object):
 
     def _method_return(self, event, sig, body):
         self.log.debug("return %s %s %s", event, sig, body)
+        if not self._running:
+            return # silently drop when not conected
         opts = [
             (5, Variant(b'u', event.serial)),
             (6, event.sender), # destination
@@ -354,6 +389,8 @@ class Connection(object):
 
     def _error(self, event, name, msg):
         self.log.debug("error %s %s %s", event, name, msg)
+        if not self._running:
+            return # silently drop when not conected
         if not is_interface(name):
             self.log.warn('Invalid error name "%s"', name)
             name = 'dbucket.InvalidErrorName'
@@ -492,11 +529,18 @@ class Connection(object):
                 self.log.exception("Remote Close")
             else:
                 self.log.debug("_recv closing: %s", e)
-            return # connection closed
+
         except:
             self.log.exception('Error in Connnection RX')
-            self._W.close()
-            self._running = False
+
+        self._W.close() # closing a closed socket is a no-op
+        self._running = False
+
+        # immediatly fail local callers with NoReply
+        self._cancel_pending()
+        
+        if not self._lost.done():
+            self._lost.set_result(None)
 
     @asyncio.coroutine
     def _bus_sig(self):

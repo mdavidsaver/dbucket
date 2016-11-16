@@ -115,7 +115,7 @@ def _close_test_bus():
         _testbus[0].stop()
         _testbus[0] = None
 
-def test_bus_info():
+def test_bus():
     """Helper to start a process-wide unique dbus-daemon
     which will be automatically stopped on process exit.
     """
@@ -124,4 +124,7 @@ def test_bus_info():
         atexit.register(_close_test_bus)
         R = _testbus[0] = DaemonRunner(loop=None)
         R.start()
-    return _testbus[0].get_info()
+    return _testbus[0]
+
+def test_bus_info():
+    return test_bus().get_info()

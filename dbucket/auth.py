@@ -85,6 +85,12 @@ def connect_bus(infos, *,
             else:
                 _log.debug('No supported transport: %s', info)
                 continue
+
+            #TODO: transports not yet handled
+            #       'nonce-tcp:host=xxx,port=...,family=...,noncefile='
+            #       'tcp:host=xxx,port=...,family=...'
+            #       'unixexec:path=...,arg0=...,...'
+
             # start authentication phase
 
             W.write(b'\0AUTH\r\n')
@@ -133,7 +139,8 @@ def connect_bus(infos, *,
 
             conn = factory(W, R, info, loop=loop, **kws)
         except:
-            W.close()
+            if W is not None:
+                W.close()
             _log.exception("Can't attach to %s", info)
             continue
 
