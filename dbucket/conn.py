@@ -294,7 +294,8 @@ class Connection(object):
         if self.debug_net:
             self.log.debug("send message serialized %s", S)
  
-    def call(self, *, path=None, interface=None, member=None, destination=None, sig=None, body=None):
+    def call(self, *, path=None, interface=None, member=None, destination=None, sig=None, body=None,
+             future=None):
         '''Call remote method
         
         :returns: A Future which completes with the result value
@@ -309,6 +310,8 @@ class Connection(object):
         if not self._running:
             ret.set_exception(NoReplyError())
             return ret
+        elif self._closed is not None:
+            raise ConnectionClosed()
 
         self.log.debug('call %s', (path, interface, member, destination, sig, body))
 
@@ -332,7 +335,7 @@ class Connection(object):
         self.log.debug("call message %s %s", req, bodystr)
         header = encode(b'yyyyuua(yv)', req)
 
-        ret = asyncio.Future(loop=self._loop)
+        ret = future or asyncio.Future(loop=self._loop)
         self._inprog[SN] = ret
         self._send(header, bodystr)
         return ret
@@ -493,7 +496,7 @@ class Connection(object):
                 elif evt.type in (METHOD_RETURN, ERROR): 
                     rsn = evt._return_sn
                     try:
-                        F = self._inprog[rsn]
+                        F = self._inprog.pop(rsn)
                     except KeyError:
                         self.log.warn('Received reply/error with unknown S/N %s', rsn)
                     else:
@@ -512,6 +515,7 @@ class Connection(object):
                             ret = ensure_future(ret)
                         if isinstance(ret, asyncio.Future):
                             ret.add_done_callback(partial(self._evt_return, evt, sig))
+                            #TODO: keep track and cancel on dis-connect
                         else:
                             self._method_return(evt, sig, ret)
                     except RemoteError as e:
@@ -570,6 +574,8 @@ class Connection(object):
 
                 else:
                     self.log.info("daemon signal %s", event)
+            except GeneratorExit:
+                raise
             except:
                 self.log.exception("Error handling dbus daemon signal")
                 yield from asyncio.sleep(10)
