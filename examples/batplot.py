@@ -8,7 +8,7 @@ import asyncio, datetime
 
 import numpy
 from matplotlib import pylab as PL
-from matplotlib.dates import date2num
+from matplotlib import dates
 
 from dbucket.conn import RemoteError
 from dbucket.auth import connect_bus, get_system_infos
@@ -69,29 +69,41 @@ def main(args):
     loop.set_debug(args.debug)
     rate, charge = loop.run_until_complete(getData(args.since))
 
-    PL.subplot(2,1,1)
+    #PL.subplot(2,1,1)
+    ax = PL.gca()
+
+    ax.xaxis.set_major_locator(dates.MinuteLocator(range(0,60,15)))
+    ax.xaxis.set_major_formatter(dates.DateFormatter('%H:%M'))
+    ax.xaxis.grid(True)
+
+    ax.set_xlabel('time')
+    ax.set_ylabel('rate', color='b')
     for dpath, data in rate.items():
         data = numpy.asarray(data, _elem)
-        T = date2num(list(map(datetime.datetime.fromtimestamp, data['T'])))
-        PL.plot_date(T, data['V'], '-*', label=dpath.split('/')[-1])
-        PL.hold(True)
+        T = dates.date2num(list(map(datetime.datetime.fromtimestamp, data['T'])))
+        ax.plot_date(T, data['V'], 'b-*', label=dpath.split('/')[-1])
+        ax.hold(True)
 
-    PL.xlabel('time')
-    PL.ylabel('rate')
-    PL.grid(True)
+    #PL.xlabel('time')
+    #PL.ylabel('rate')
+    #PL.grid(True)
     PL.legend()
 
-    PL.subplot(2,1,2)
+    #PL.subplot(2,1,2)
+    ax = ax.twinx()
+    ax.set_ylabel('charge', color='r')
     for dpath, data in charge.items():
         data = numpy.asarray(data, _elem)
-        T = date2num(list(map(datetime.datetime.fromtimestamp, data['T'])))
-        PL.plot_date(T, data['V'], '-*', label=dpath.split('/')[-1])
-        PL.hold(True)
+        T = dates.date2num(list(map(datetime.datetime.fromtimestamp, data['T'])))
+        ax.plot_date(T, data['V'], 'r-*', label=dpath.split('/')[-1])
+        ax.hold(True)
 
     PL.xlabel('time')
     PL.ylabel('change')
-    PL.grid(True)
+    PL.grid()
     PL.legend()
+
+    PL.gcf().autofmt_xdate()
 
     PL.show()
 
