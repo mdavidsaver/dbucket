@@ -87,26 +87,24 @@ class ProxyBase(object):
 
 def makeCall(iface, mname, sig, nargs):
     if nargs==0:
-        @asyncio.coroutine
         def meth(self):
-            return (yield from self._dbus_connection.call(
+            return self._dbus_connection.call(
                 destination=self._dbus_destination,
                 path=self._dbus_path,
                 interface=iface,
                 member=mname,
-            ))
+            )
     else:
-        @asyncio.coroutine
         def meth(self, *args):
             assert len(args)==nargs, "signature: "+sig
-            return (yield from self._dbus_connection.call(
+            return self._dbus_connection.call(
                 destination=self._dbus_destination,
                 path=self._dbus_path,
                 interface=iface,
                 member=mname,
                 sig=sig,
                 body=args
-            ))
+            )
     meth._dbus_method = mname
     meth._dbus_sig = sig
     meth._dbus_nargs = nargs

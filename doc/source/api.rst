@@ -42,8 +42,16 @@ Bus Connection
 
 .. autoclass:: ConnectionClosed
 .. autoclass:: RemoteError
+.. autoclass:: NoReplyError
 .. autoclass:: BusEvent
    :members:
 
 .. autoclass:: Connection
-   :members: close, name, names, running, new_queue, call, signal
+
+   .. autoattribute:: loop
+   .. autoattribute:: name
+   .. autoattribute:: names
+   .. autoattribute:: running
+   .. automethod:: close
+   .. automethod:: call
+   .. automethod:: signal

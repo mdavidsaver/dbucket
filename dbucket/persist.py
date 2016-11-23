@@ -1,7 +1,8 @@
 
 import asyncio, logging
+from collections import defaultdict
 
-from .conn import ConnectionClosed
+from .conn import ConnectionClosed, DBUS, DBUS_PATH
 from .auth import connect_bus
 
 class PersistentConnection(object):
@@ -20,6 +21,10 @@ class PersistentConnection(object):
 
         self._call_Q = []
 
+        self.daemon = None
+
+        self._signals = {}
+
     @asyncio.coroutine
     def _connect_task(self):
         conn = None
@@ -29,10 +34,14 @@ class PersistentConnection(object):
                 try:
                     self._log.debug("Connecting")
                     conn = yield from connect_bus(self._infofn(), loop=self._loop)
+                    self.damon = conn.daemon
+                    # daemon calls will not be queued
                 except:
                     self._log.exception("Error while (re)connecting")
                 else:
+                    retry = 0.1
                     self._log.debug("Connected")
+
                     # mark ourselves as connected
                     self._disconnect_F = asyncio.Future(loop=self._loop)
                     self._connect_F.set_result(self)
@@ -64,6 +73,7 @@ class PersistentConnection(object):
                         self._log.exception("Error while waiting for disconnect")
                     finally:
                         conn = self._conn = None
+                        self.damon = None
                         self._connect_F = asyncio.Future(loop=self._loop)
                         self._disconnect_F.set_result(self)
 
@@ -81,6 +91,7 @@ class PersistentConnection(object):
             if self._connect_F.done():
                 self._connect_F = asyncio.Future(loop=self._loop)
         finally:
+            self.daemon = None
             if conn:
                 yield from conn.close()
 
@@ -158,3 +169,31 @@ class PersistentConnection(object):
     def signal(self, **kws):
         if self._conn is not None:
             return self._conn.signal(**kws)
+
+    def new_queue(self, **kws):
+        '''Create are return a new :py:class:`.SignalQueue`.
+        '''
+        Q = SignalQueue(self, **kws)
+        self._signals.append(Q)
+        if self._conn is not None:
+            self._conn._add_queue(Q)
+        return Q
+
+    @asyncio.coroutine
+    def AddMatch(self, obj, expr):
+        if self._close_F is not None:
+            raise ConnectionClosed()
+        if self._conn is not None:
+            yield from self._conn.AddMatch(obj, expr)
+        self._signals[expr].add(obj)
+
+    @asyncio.coroutine
+    def RemoveMatch(self, obj, expr):
+        if self._close_F is not None:
+            return
+        S = self._signals[expr]
+        S.remove(obj)
+        if len(S)==0:
+            del self._signals[expr]
+        if self._conn is not None:
+            yield from self._conn.AddMatch(obj, expr)

@@ -47,6 +47,9 @@ class RemoteError(RuntimeError):
         self.name = name
 
 class NoReplyError(RemoteError):
+    """Thrown once it is known that a method call, or its reply, will
+    never be delivered due to a lost connection.
+    """
     def __init__(self):
         RemoteError.__init__(self, "Bus Connection closed/lost", name=NoReply)
 
@@ -124,7 +127,10 @@ class Connection(object):
 
         self._inprog  = {} # in progress method calls we made.  {sn:Future()}
         self._signals = [] # registered signal matches we might receive.  [SignalQueue()]
-        
+
+        self._add_queue = self._signals.append
+        self._drop_queue = self._signals.remove
+
         from .proxy import MethodDispatch
         self._methods = MethodDispatch(self)
         # delegate some of our methods to dispatcher
@@ -153,9 +159,10 @@ class Connection(object):
     def close(self):
         """close out connection.
 
-        Immediately starts shutdown process and
-        returns a Future which completes after the connection is closed,
-        and all resulting notifications are delivered.
+        Immediately starts shutdown process.
+        
+        :rtype: asyncio.Future
+        :returns: a Future which completes after the connection is closed, and all resulting notifications are delivered.
         """
         self.log.debug("Closing")
         if self._closed is None:
@@ -214,12 +221,12 @@ class Connection(object):
 
     @property
     def name(self):
-        'My primary bus name'
+        'Unique bus name for this Connection'
         return self._name
 
     @property
     def names(self):
-        'All my bus names'
+        'All my bus names, including unique'
         return self._names
 
     @property
@@ -229,7 +236,14 @@ class Connection(object):
 
     @property
     def loop(self):
+        'The event loop passed to the ctor'
         return self._loop
+
+    def _log_err(self, F):
+        try:
+            F.result()
+        except:
+            self.log.exception("Unexpected error")
 
     @asyncio.coroutine
     def AddMatch(self, obj, expr):
@@ -298,7 +312,7 @@ class Connection(object):
              future=None):
         '''Call remote method
         
-        :returns: A Future which completes with the result value
+        :returns: A Future which completes with the result value.  If future==None then a new Future is allocated.
         :throws: RemoteError if call results in an Error response.
         '''
         assert path is not None, "Method calls require path="

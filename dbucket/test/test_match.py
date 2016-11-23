@@ -14,6 +14,7 @@ class FakeConnection(object):
     def __init__(self, loop):
         self._loop = loop
         self.matches = defaultdict(set)
+        self.Qs = []
     @asyncio.coroutine
     def AddMatch(self, obj, expr):
         log.debug('AddMatch %s %s -> %s', obj, expr, self.matches)
@@ -25,6 +26,8 @@ class FakeConnection(object):
         L.remove(obj)
         if len(L)==0:
             del self.matches[expr]
+    def _drop_queue(self, Q):
+        self.Qs.remove(Q)
 
 class TestCond(unittest.TestCase):
     evt1 = BusEvent(SIGNAL, 1, [
@@ -102,6 +105,7 @@ class TestQueue(unittest.TestCase):
     def setUp(self):
         self.conn = FakeConnection(self.loop)
         self.Q = SignalQueue(self.conn, qsize=2)
+        self.conn.Qs.append(self.Q)
 
     def tearDown(self):
         self.assertDictEqual(self.conn.matches, {})

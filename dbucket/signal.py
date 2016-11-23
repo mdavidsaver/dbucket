@@ -135,6 +135,8 @@ class SignalQueue(object):
         self._done = 1
         _log.debug("Closing signal SignalQueue")
 
+        self.conn._drop_queue(self)
+
         # remove out matches
         conds, self._cond = self._cond, []
         yield from asyncio.gather(*[self.conn.RemoveMatch(C, C.expr) for C in conds],
